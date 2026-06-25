@@ -1,0 +1,21 @@
+{
+  // --- General Workspace Settings ---
+
+  // Turn on auto-save when you focus out of the editor.
+  // Other options: "off" | "afterDelay" | "onFocusChange" | "onWindowChange"
+  "files.autoSave": "onFocusChange",
+
+  // --- Formatting Settings ---
+
+  // Enable formatting on save for all editors.
+  "editor.formatOnSave": true,
+
+  // --- Language-Specific Settings ---
+
+  // Use Ruff as the default formatter for Python files.
+  // This is better than setting it globally, as it won't conflict with formatters
+  // for other languages like HTML, CSS, or JavaScript.
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff"
+  },
+}
