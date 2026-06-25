@@ -3,6 +3,7 @@
 import django.db.models.deletion
 import pgvector.django.vector
 from django.db import migrations, models
+from django.contrib.postgres.operations import CreateExtension
 
 
 class Migration(migrations.Migration):
@@ -11,6 +12,7 @@ class Migration(migrations.Migration):
     dependencies = []
 
     operations = [
+        CreateExtension("vector"),
         migrations.CreateModel(
             name="Chat",
             fields=[
