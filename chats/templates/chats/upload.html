@@ -1,0 +1,60 @@
+{% extends "chats/base.html" %}
+
+{% block extra_styles %}
+#upload-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    padding: 40px;
+}
+
+#upload-container h2 { font-size: 24px; color: #fff; }
+#upload-container p  { color: #888; font-size: 14px; }
+
+#upload-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 100%;
+    max-width: 400px;
+}
+
+#upload-form input[type="text"],
+#upload-form input[type="file"] {
+    padding: 10px 14px;
+    background: #2a2a2a;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    color: #ececec;
+    font-size: 14px;
+}
+
+#upload-form button {
+    padding: 10px;
+    background: #6c63ff;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+#upload-form button:hover { background: #5a52e0; }
+{% endblock %}
+
+{% block main %}
+<div id="upload-container">
+    <h2>AskMyPDF</h2>
+    <p>Upload a PDF to start a new chat</p>
+
+    <form id="upload-form" method="POST" enctype="multipart/form-data">
+        {% csrf_token %}
+        <input type="text" name="title" placeholder="Title (optional)">
+        <input type="file" name="pdf" accept=".pdf" required>
+        <button type="submit">Upload & Start Chat</button>
+    </form>
+</div>
+{% endblock %}
