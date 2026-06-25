@@ -1,10 +1,13 @@
+from pgvector.django import CosineDistance
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from chats.models import DocumentChunk
 
 from .types import ChunkData, PageData
 
 # initialize once at module level — no need to recreate on every call
-splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=100)
 
 embeddings_model = OpenAIEmbeddings(
     model="text-embedding-3-small",  # 1536 dimensions, cheap
@@ -54,3 +57,17 @@ def embed_chunks(chunks: list[ChunkData]):
         chunk.embedding = vector
 
     return chunks
+
+
+def retrieve_chunks(chat_id: int, question: str, k: int = 5) -> list[DocumentChunk]:
+    """
+    Embeds the question and finds top-k most similar chunks for this chat.
+    """
+    # unlike embed_chunks, using embed_query here, as we are embedding a single query
+    question_vector = embeddings_model.embed_query(question)
+
+    chunks = DocumentChunk.objects.filter(chat_id=chat_id).order_by(
+        CosineDistance("embedding", question_vector)
+    )[:k]
+
+    return list(chunks)
