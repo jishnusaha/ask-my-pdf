@@ -46,6 +46,6 @@ class ChatDetailView(View):
         if not question:
             return redirect("chat_detail", pk=pk)
 
-        ask(chat_id=pk, question=question)
+        ask(pk, question)
 
         return redirect("chat_detail", pk=pk)

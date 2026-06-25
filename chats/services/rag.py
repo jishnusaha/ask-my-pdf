@@ -1,14 +1,21 @@
+import tiktoken
 from langchain_openai import ChatOpenAI
+from langchain_core.output_parsers import StrOutputParser
 
 from chats.models import ChatMessage
 from chats.services.embedder import retrieve_chunks
-from langchain_core.output_parsers import StrOutputParser
 
 from .prompts import query_rewriter_prompt
 
+TOKEN_LIMIT = 128000
+TOKEN_BUFFER = 2000  # reserve for LLM response
+
+MODEL_NAME = "gpt-4.1-mini"
+
 llm = ChatOpenAI(
-    model="gpt-4o",
+    model=MODEL_NAME,
     temperature=0.2,  # deterministic output
+    max_tokens=TOKEN_BUFFER,
 )
 
 
@@ -23,7 +30,10 @@ def ask(chat_id: int, original_query: str):
     )
 
     # will only used for retrieving relevant chunks from the vector database
-    rewritten_query = get_rewritten_query(original_query, chat_history)
+    if chat_history:
+        rewritten_query = get_rewritten_query(original_query, chat_history)
+    else:
+        rewritten_query = original_query
 
     # retrieve chunks
     chunks = retrieve_chunks(chat_id, rewritten_query)
@@ -32,7 +42,6 @@ def ask(chat_id: int, original_query: str):
         [f"[Page {chunk.page_number}]\n{chunk.content}" for chunk in chunks]
     )
 
-    # step 2 — build messages
     messages = build_messages(original_query, context, chat_history)
 
     # step 3 — call LLM
@@ -76,15 +85,19 @@ def format_chat_history_for_query_rewriter(messages: list[ChatMessage]) -> str:
     return "\n".join(formatted_history)
 
 
+def count_tokens(text: str, model: str) -> int:
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding(
+            "cl100k_base"
+        )  # fallback, works for all GPT-4 family
+    return len(encoding.encode(text))
+
+
 def build_messages(
     question: str, context: str, chat_history: list[ChatMessage]
 ) -> list[dict]:
-    """
-    Builds the full message list:
-    - system prompt with context
-    - previous chat history
-    - current question
-    """
 
     SYSTEM_PROMPT = """
         You are a helpful assistant that answers questions based strictly on the provided PDF context.
@@ -94,13 +107,30 @@ def build_messages(
         Context from the PDF:
         {context}
     """
-    messages = [{"role": "system", "content": SYSTEM_PROMPT.format(context=context)}]
 
-    # load previous messages for this chat — resume chat support
-    for msg in chat_history:
+    system_content = SYSTEM_PROMPT.format(context=context)
+    budget = TOKEN_LIMIT - TOKEN_BUFFER
+    budget -= count_tokens(system_content, MODEL_NAME)
+    budget -= count_tokens(question, MODEL_NAME)
+
+    # trim oldest history messages first until we fit in budget
+    trimmed_history = chat_history[::-1]  # reverse to pop from the end (oldest first)
+
+    # calculate token count first
+    token_counts = [count_tokens(m.content, MODEL_NAME) for m in trimmed_history]
+    total_tokens = sum(token_counts)
+    while trimmed_history:
+        if total_tokens <= budget:
+            break
+
+        total_tokens -= token_counts.pop()  # remove the corresponding token count
+        trimmed_history.pop()  # drop oldest message
+
+    trimmed_history.reverse()  # restore original order
+
+    messages = [{"role": "system", "content": system_content}]
+    for msg in trimmed_history:
         messages.append({"role": msg.role, "content": msg.content})
-
-    # append current question
     messages.append({"role": "user", "content": question})
 
     return messages

@@ -47,6 +47,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "psycopg2-binary" },
     { name = "pypdf" },
+    { name = "tiktoken" },
 ]
 
 [package.dev-dependencies]
@@ -66,6 +67,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "psycopg2-binary", specifier = ">=2.9.12" },
     { name = "pypdf", specifier = ">=6.14.2" },
+    { name = "tiktoken", specifier = ">=0.13.0" },
 ]
 
 [package.metadata.requires-dev]
