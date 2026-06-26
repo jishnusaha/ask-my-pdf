@@ -1,10 +1,10 @@
 from django.shortcuts import render, redirect, get_object_or_404
 from django.views import View
 from chats.models import Chat
-from chats.services.parser import extract_text_by_page
-from chats.services.embedder import chunk_pages, embed_chunks
-from chats.services.ingestor import ingest_chunks
-from chats.services.rag import ask
+from chats.services.rag.parser import extract_text_by_page
+from chats.services.rag.embedder import chunk_pages, embed_chunks
+from chats.services.rag.ingestor import ingest_chunks
+from chats.services.rag.pipeline import ask
 
 
 def sidebar_context():
@@ -40,12 +40,12 @@ class ChatDetailView(View):
         return render(request, "chats/chat.html", context)
 
     def post(self, request, pk):
-        get_object_or_404(Chat, pk=pk)
+        chat = get_object_or_404(Chat, pk=pk)
         question = request.POST.get("question", "").strip()
 
         if not question:
             return redirect("chat_detail", pk=pk)
 
-        ask(pk, question)
+        ask(pk, question, list(chat.messages.all()))
 
         return redirect("chat_detail", pk=pk)

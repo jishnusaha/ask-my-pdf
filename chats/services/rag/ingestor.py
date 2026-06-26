@@ -1,7 +1,7 @@
 from chats.models import Chat, DocumentChunk
 from django.db import transaction
 
-from chats.services.types import ChunkData
+from .types import ChunkData
 
 
 def ingest_chunks(title: str, chunks: list[ChunkData]) -> Chat:
