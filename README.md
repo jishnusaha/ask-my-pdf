@@ -123,16 +123,16 @@ services:
   db:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_DB: askmypdf
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      - "5432:5432"
+      - ${POSTGRES_PORT}:5432
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - db_data:/var/lib/postgresql/data
 
 volumes:
-  pgdata:
+  db_data:
 ```
 
 ### 3. Install dependencies
@@ -143,15 +143,19 @@ uv sync
 
 ### 4. Configure environment
 
-```bash
-cp .env.example .env
-```
-
 `.env`:
 
 ```env
 OPENAI_API_KEY=sk-...
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/askmypdf
+SECRET_KEY=+dg...
+DEBUG=False
+POSTGRES_DB=app
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_HOST=localhost
+POSTGRES_PORT=9002
+ALLOWED_HOSTS=127.0.0.1
+CSRF_TRUSTED_ORIGINS=http://127.0.0.1:9001
 ```
 
 ### 5. Run migrations
@@ -177,8 +181,7 @@ Visit `http://localhost:8000/chats/`
 ```
 Chat
   ├── title
-  ├── created_at
-  └── is_processed
+  └── created_at
 
 DocumentChunk
   ├── chat (FK)
@@ -239,7 +242,34 @@ Before calling the LLM, the pipeline calculates the total token consumption acro
 | `ALLOWED_HOSTS` | Comma-separated list of allowed hosts (e.g. `localhost,127.0.0.1`) |
 | `CSRF_TRUSTED_ORIGINS` | Trusted origins for CSRF (e.g. `http://localhost:8000`) |
 
+
 ---
+
+#  Application Flow
+
+```mermaid
+flowchart TD
+A[Create New Chat] --> B[Submit PDF File]
+B --> C[Extract PDF Text]
+C --> D[Create Chunks]
+D --> E[Embed Chunks]
+E --> F[Save To Db]
+
+A1[User Question] --> B1[Rewrite Query]
+B1 --> C1[Embed Rewritten Query]
+C1 --> D1[Vector Search]
+D1 --> E1[Retrieve Top-K Chunks]
+E1 --> F1[Rerank Chunks]
+F1 --> |Token Budget| G1[Trim Chat History]
+G1 --> H1[Build Prompt]
+H1 --> I1[Call LLM]
+I1 --> J1[Save Messages]
+J1 --> K1[Return Answer]
+
+```
+
+---
+
 
 ## Future Improvement Plans
 
