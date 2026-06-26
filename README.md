@@ -18,6 +18,7 @@ AskMyPDF uses a RAG (Retrieval-Augmented Generation) pipeline to extract, chunk,
 - Resume previous chats — full conversation history preserved
 - Answers grounded strictly in PDF content, no hallucination
 - Query rewriting for accurate retrieval on follow-up questions
+- Cross-encoder reranking to filter and reorder chunks by true relevance
 - Token budget management to handle long conversations safely
 
 ---
@@ -35,6 +36,7 @@ User Question
   → rewrite query using chat history        (resolves pronouns for better retrieval)
   → embed rewritten query
   → similarity search → top 5 chunks        (pgvector cosine distance)
+  → rerank chunks by relevance              (cross-encoder, filters irrelevant chunks)
   → trim chat history to fit token budget   (oldest messages dropped first)
   → build prompt with context + history
   → generate answer                         (gpt-4.1-mini)
@@ -49,6 +51,7 @@ User Question
 |---|---|
 | Backend | Django, Django REST Framework |
 | AI / LLM | LangChain, OpenAI (gpt-4.1-mini, text-embedding-3-small) |
+| Reranker | sentence-transformers (cross-encoder/ms-marco-MiniLM-L-6-v2) |
 | Vector Store | pgvector (PostgreSQL) |
 | PDF Parsing | pypdf |
 | Frontend | Django Templates, vanilla CSS |
@@ -74,6 +77,7 @@ ask-my-pdf/
 │   │       ├── config.py           # model name, token limits, llm instance
 │   │       ├── prompts.py          # query rewriter + answer generation prompts
 │   │       ├── query_rewriter.py   # query rewriting for retrieval
+│   │       ├── reranker.py         # cross-encoder reranking + filtering
 │   │       ├── generate_response.py # prompt building + LLM call
 │   │       ├── pipeline.py         # orchestrates the full ask() flow
 │   │       ├── parser.py           # PDF text extraction
@@ -162,6 +166,8 @@ python manage.py migrate
 python manage.py runserver
 ```
 
+> **Note:** On first run, the reranker model (~80MB) will be automatically downloaded from HuggingFace and cached locally at `~/.cache/huggingface/hub/`. Subsequent starts load from cache instantly.
+
 Visit `http://localhost:8000/chats/`
 
 ---
@@ -196,9 +202,10 @@ The pipeline is organized as a clean package under `chats/services/rag/`, each f
 
 | File | Responsibility |
 |---|---|
-| `config.py` | Model name, token limits, shared LLM instance |
+| `config.py` | Model name, token limits, rerank threshold, shared LLM instance |
 | `prompts.py` | `ChatPromptTemplate` for query rewriting and answer generation |
 | `query_rewriter.py` | Rewrites follow-up questions into standalone retrieval queries |
+| `reranker.py` | Cross-encoder scoring, reordering, and filtering of retrieved chunks |
 | `embedder.py` | Chunks, embeds, and retrieves document chunks via pgvector |
 | `generate_response.py` | Builds prompt with token-aware history trimming, calls LLM |
 | `ingestor.py` | Atomically saves Chat and all DocumentChunks to DB |
@@ -208,6 +215,10 @@ The pipeline is organized as a clean package under `chats/services/rag/`, each f
 ### Query Rewriting
 
 Follow-up questions like *"what did it say about the deadline?"* are rewritten into standalone queries like *"What are the project deadlines mentioned in the document?"* before retrieval. This resolves pronoun references and dramatically improves vector search accuracy. The rewritten query is used only for retrieval — the original question is preserved in the conversation.
+
+### Reranking
+
+After retrieval, a cross-encoder model (`cross-encoder/ms-marco-MiniLM-L-6-v2`) scores each `(query, chunk)` pair together — unlike the bi-encoder embedder which encodes them separately. This produces more accurate relevance scores. Chunks below the relevance threshold (`RERANK_THRESHOLD = 3`) are filtered out entirely. If all chunks are filtered, the top-ranked chunk is kept as a fallback. The model (~80MB) is loaded into memory once on Django startup and reused for all subsequent requests.
 
 ### Token Budget Guard
 
@@ -232,10 +243,9 @@ Before calling the LLM, the pipeline calculates the total token consumption acro
 
 ## Future Improvement Plans
 
-- [ ] Reranking retrieved chunks with a cross-encoder for better relevance ordering
+- [ ] Source citation with page numbers
 - [ ] Streaming responses
 - [ ] Multi-PDF support per chat
-- [ ] Source citation with page numbers
 - [ ] User authentication
 - [ ] File upload progress indicator
 - [ ] Export chat history
