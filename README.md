@@ -17,6 +17,8 @@ AskMyPDF uses a RAG (Retrieval-Augmented Generation) pipeline to extract, chunk,
 - Chat with your PDF using natural language
 - Resume previous chats — full conversation history preserved
 - Answers grounded strictly in PDF content, no hallucination
+- Query rewriting for accurate retrieval on follow-up questions
+- Token budget management to handle long conversations safely
 
 ---
 
@@ -24,16 +26,18 @@ AskMyPDF uses a RAG (Retrieval-Augmented Generation) pipeline to extract, chunk,
 
 ```
 PDF Upload
-  → extract text page by page         (pypdf)
-  → split into overlapping chunks      (LangChain RecursiveCharacterTextSplitter)
-  → batch embed chunks                 (OpenAI text-embedding-3-small)
-  → store chunks + vectors in DB       (pgvector)
+  → extract text page by page              (pypdf)
+  → split into overlapping chunks           (LangChain RecursiveCharacterTextSplitter)
+  → batch embed chunks                      (OpenAI text-embedding-3-small)
+  → store chunks + vectors in DB            (pgvector)
 
 User Question
-  → embed question
-  → similarity search → top 5 chunks   (pgvector cosine distance)
+  → rewrite query using chat history        (resolves pronouns for better retrieval)
+  → embed rewritten query
+  → similarity search → top 5 chunks        (pgvector cosine distance)
+  → trim chat history to fit token budget   (oldest messages dropped first)
   → build prompt with context + history
-  → generate answer                    (gpt-4o)
+  → generate answer                         (gpt-4.1-mini)
   → save to chat history
 ```
 
@@ -44,7 +48,7 @@ User Question
 | Layer | Technology |
 |---|---|
 | Backend | Django, Django REST Framework |
-| AI / LLM | LangChain, OpenAI (gpt-4o, text-embedding-3-small) |
+| AI / LLM | LangChain, OpenAI (gpt-4.1-mini, text-embedding-3-small) |
 | Vector Store | pgvector (PostgreSQL) |
 | PDF Parsing | pypdf |
 | Frontend | Django Templates, vanilla CSS |
@@ -56,19 +60,25 @@ User Question
 
 ```
 ask-my-pdf/
-├── config/               # project settings
+├── config/                   # project settings
 │   ├── settings.py
 │   ├── urls.py
 │   └── wsgi.py
-├── chats/                  # main app
-│   ├── models.py           # Chat, DocumentChunk, ChatMessage
-│   ├── views.py            # ChatListCreateView, ChatDetailView
+├── chats/                    # main app
+│   ├── models.py             # Chat, DocumentChunk, ChatMessage
+│   ├── views.py              # ChatListCreateView, ChatDetailView
 │   ├── urls.py
 │   ├── services/
-│   │   ├── parser.py       # PDF text extraction
-│   │   ├── embedder.py     # chunking + embedding
-│   │   ├── ingestor.py     # atomic DB save
-│   │   └── rag.py          # retrieval + LLM answer
+│   │   └── rag/
+│   │       ├── __init__.py
+│   │       ├── config.py           # model name, token limits, llm instance
+│   │       ├── prompts.py          # query rewriter + answer generation prompts
+│   │       ├── query_rewriter.py   # query rewriting for retrieval
+│   │       ├── generate_response.py # prompt building + LLM call
+│   │       ├── pipeline.py         # orchestrates the full ask() flow
+│   │       ├── parser.py           # PDF text extraction
+│   │       ├── embedder.py         # chunking + embedding + retrieval
+│   │       └── ingestor.py         # atomic DB save
 │   └── templates/
 │       └── chats/
 │           ├── base.html
@@ -180,18 +190,30 @@ ChatMessage
 
 ---
 
-## Services
+## RAG Pipeline
 
-| Service | Responsibility |
+The pipeline is organized as a clean package under `chats/services/rag/`, each file with a single responsibility:
+
+| File | Responsibility |
 |---|---|
-| `parser.py` | Extract text from PDF page by page using pypdf |
-| `embedder.py` | Split pages into 500-token chunks, batch embed via OpenAI |
-| `ingestor.py` | Atomically save Chat + all DocumentChunks to DB |
-| `rag.py` | Embed question, retrieve top-5 chunks, call GPT-4o, save messages |
+| `config.py` | Model name, token limits, shared LLM instance |
+| `prompts.py` | `ChatPromptTemplate` for query rewriting and answer generation |
+| `query_rewriter.py` | Rewrites follow-up questions into standalone retrieval queries |
+| `embedder.py` | Chunks, embeds, and retrieves document chunks via pgvector |
+| `generate_response.py` | Builds prompt with token-aware history trimming, calls LLM |
+| `ingestor.py` | Atomically saves Chat and all DocumentChunks to DB |
+| `parser.py` | Extracts text from PDF page by page using pypdf |
+| `pipeline.py` | Orchestrates the full ask() flow |
+
+### Query Rewriting
+
+Follow-up questions like *"what did it say about the deadline?"* are rewritten into standalone queries like *"What are the project deadlines mentioned in the document?"* before retrieval. This resolves pronoun references and dramatically improves vector search accuracy. The rewritten query is used only for retrieval — the original question is preserved in the conversation.
+
+### Token Budget Guard
+
+Before calling the LLM, the pipeline calculates the total token consumption across the system prompt, retrieved context, chat history, and current question. If the total exceeds the model's context window, the oldest chat history messages are dropped first until the prompt fits. Retrieved chunks are preserved as long as possible since they are the primary source of truth.
 
 ---
-
-## Environment Variables
 
 ## Environment Variables
 
@@ -205,15 +227,15 @@ ChatMessage
 | `POSTGRES_PORT` | PostgreSQL port (e.g. `5432`) |
 | `ALLOWED_HOSTS` | Comma-separated list of allowed hosts (e.g. `localhost,127.0.0.1`) |
 | `CSRF_TRUSTED_ORIGINS` | Trusted origins for CSRF (e.g. `http://localhost:8000`) |
+
 ---
 
 ## Future Improvement Plans
 
+- [ ] Reranking retrieved chunks with a cross-encoder for better relevance ordering
 - [ ] Streaming responses
 - [ ] Multi-PDF support per chat
 - [ ] Source citation with page numbers
 - [ ] User authentication
 - [ ] File upload progress indicator
 - [ ] Export chat history
-
----
