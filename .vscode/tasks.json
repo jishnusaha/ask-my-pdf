@@ -4,7 +4,7 @@
       {
         "label": "docker-compose-up",
         "type": "shell",
-        "command": "docker compose -f docker-compose.local.yml up -d",
+        "command": "docker compose -f docker-compose.yml up -d",
         "problemMatcher": []
       }
     ]
