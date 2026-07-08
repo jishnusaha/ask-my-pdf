@@ -249,20 +249,22 @@ Before calling the LLM, the pipeline calculates the total token consumption acro
 
 ```mermaid
 flowchart TD
-A[Create New Chat] --> B[Submit PDF File]
+Start --> |Create New Chat| B[Submit PDF File]
 B --> C[Extract PDF Text]
 C --> D[Create Chunks]
 D --> E[Embed Chunks]
 E --> F[Save To Db]
+F --> A1[User Ask Question]
 
-A1[User Question] --> B1[Rewrite Query]
+Start --> |Resume Previous Chat| A1
+A1 --> B1[Rewrite Query]
 B1 --> C1[Embed Rewritten Query]
 C1 --> D1[Vector Search]
 D1 --> E1[Retrieve Top-K Chunks]
 E1 --> F1[Rerank Chunks]
 F1 --> |Token Budget| G1[Trim Chat History]
 G1 --> H1[Build Prompt]
-H1 --> I1[Call LLM]
+H1 --> |LLM Call|I1[Generate Answer]
 I1 --> J1[Save Messages]
 J1 --> K1[Return Answer]
 
