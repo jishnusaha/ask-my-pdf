@@ -17,6 +17,8 @@ AskMyPDF uses a RAG (Retrieval-Augmented Generation) pipeline to extract, chunk,
 - Chat with your PDF using natural language
 - Resume previous chats — full conversation history preserved
 - Answers grounded strictly in PDF content, no hallucination
+- Inline page citations — every answer cites the exact PDF pages it draws from, rendered as badges
+- Markdown-formatted answers (bold, lists, code) rendered cleanly in the chat UI
 - Query rewriting for accurate retrieval on follow-up questions
 - Cross-encoder reranking to filter and reorder chunks by true relevance
 - Token budget management to handle long conversations safely
@@ -39,8 +41,9 @@ User Question
   → rerank chunks by relevance              (cross-encoder, filters irrelevant chunks)
   → trim chat history to fit token budget   (oldest messages dropped first)
   → build prompt with context + history
-  → generate answer                         (gpt-4.1-mini)
+  → generate answer with inline [Page N] citations   (gpt-4.1-mini)
   → save to chat history
+  → render markdown + citation badges for display     (parser + template filter)
 ```
 
 ---
@@ -80,9 +83,11 @@ ask-my-pdf/
 │   │       ├── reranker.py         # cross-encoder reranking + filtering
 │   │       ├── generate_response.py # prompt building + LLM call
 │   │       ├── pipeline.py         # orchestrates the full ask() flow
-│   │       ├── parser.py           # PDF text extraction
+│   │       ├── parser.py           # PDF text extraction + answer/citation rendering
 │   │       ├── embedder.py         # chunking + embedding + retrieval
 │   │       └── ingestor.py         # atomic DB save
+│   ├── templatetags/
+│   │   └── chat_extras.py      # render_answer filter (markdown + citation badges)
 │   └── templates/
 │       └── chats/
 │           ├── base.html
@@ -212,7 +217,7 @@ The pipeline is organized as a clean package under `chats/services/rag/`, each f
 | `embedder.py` | Chunks, embeds, and retrieves document chunks via pgvector |
 | `generate_response.py` | Builds prompt with token-aware history trimming, calls LLM |
 | `ingestor.py` | Atomically saves Chat and all DocumentChunks to DB |
-| `parser.py` | Extracts text from PDF page by page using pypdf |
+| `parser.py` | Extracts text from PDF page by page (pypdf); renders answers (markdown + `[Page N]` citations) into safe HTML for display |
 | `pipeline.py` | Orchestrates the full ask() flow |
 
 ### Query Rewriting
@@ -226,6 +231,10 @@ After retrieval, a cross-encoder model (`cross-encoder/ms-marco-MiniLM-L-6-v2`) 
 ### Token Budget Guard
 
 Before calling the LLM, the pipeline calculates the total token consumption across the system prompt, retrieved context, chat history, and current question. If the total exceeds the model's context window, the oldest chat history messages are dropped first until the prompt fits. Retrieved chunks are preserved as long as possible since they are the primary source of truth.
+
+### Source Citations
+
+Each retrieved chunk is injected into the prompt with a `[Page N]` marker, and the answer-generation prompt instructs the model to cite the source page inline (e.g. `Revenue grew 12% [Page 4].`) after any statement drawn from the context — only for pages that actually appear in the retrieved chunks, and never on a "not found" answer. The raw answer (markdown + `[Page N]`) is saved as-is in `ChatMessage.content`, then `parser.render_answer()` — exposed to templates via the `render_answer` filter — converts it to safe, escaped HTML, rendering the markdown and turning each `[Page N]` into a styled citation badge in the chat UI.
 
 ---
 
@@ -275,7 +284,7 @@ J1 --> K1[Return Answer]
 
 ## Future Improvement Plans
 
-- [ ] Source citation with page numbers
+- [x] Source citation with page numbers
 - [ ] Streaming responses
 - [ ] Multi-PDF support per chat
 - [ ] User authentication

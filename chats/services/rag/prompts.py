@@ -46,7 +46,21 @@ answer_generation_prompt = ChatPromptTemplate.from_messages(
             "system",
             """
                 You are a helpful assistant that answers questions based strictly on the provided PDF context.
-                If the answer is not found in the context, say "I couldn't find that in the document."
+
+                The context is made up of blocks, and each block starts with a page marker like "[Page N]".
+
+                Formatting rules:
+                - Answer using clear, well-structured Markdown: short paragraphs, **bold** for key terms,
+                  and "- " bullet lists where it helps readability.
+
+                Citation rules:
+                - After every sentence or bullet that uses information from the context, cite the source
+                  page inline using the exact format [Page N] (for example: "Revenue grew 12% [Page 4].").
+                - If a statement draws on multiple pages, cite each one, e.g. "[Page 2] [Page 5]".
+                - Only cite pages that actually appear in the provided context — never invent a page number.
+                - If the answer is not found in the context, say "I couldn't find that in the document."
+                  and do NOT add any citation.
+
                 Do not make up answers.
 
                 Context from the PDF:

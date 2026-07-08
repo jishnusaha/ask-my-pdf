@@ -1,4 +1,5 @@
 {% extends "chats/base.html" %}
+{% load chat_extras %}
 
 {% block extra_styles %}
 #chat-container {
@@ -38,6 +39,53 @@
 
 .user .bubble      { background: #6c63ff; color: #fff; border-bottom-right-radius: 4px; }
 .assistant .bubble { background: #2a2a2a; color: #ececec; border-bottom-left-radius: 4px; }
+
+/* ── Rendered markdown inside assistant answers ── */
+.assistant .bubble p { margin: 0 0 10px; }
+.assistant .bubble p:last-child { margin-bottom: 0; }
+
+.assistant .bubble ul,
+.assistant .bubble ol {
+    margin: 0 0 10px;
+    padding-left: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.assistant .bubble ul:last-child,
+.assistant .bubble ol:last-child { margin-bottom: 0; }
+.assistant .bubble li { padding-left: 2px; }
+
+.assistant .bubble strong { color: #fff; font-weight: 600; }
+
+.assistant .bubble code {
+    background: #1a1a1a;
+    border: 1px solid #3a3a3a;
+    border-radius: 5px;
+    padding: 1px 5px;
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    font-size: 12.5px;
+}
+
+/* ── Page-reference citation badge ── */
+.citation {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    vertical-align: baseline;
+    margin: 0 1px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: rgba(108, 99, 255, 0.18);
+    border: 1px solid rgba(108, 99, 255, 0.45);
+    color: #b7b2ff;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.5;
+    white-space: nowrap;
+    cursor: default;
+}
+.citation .citation-icon { font-size: 10px; }
 
 .message .time { font-size: 11px; color: #555; padding: 0 4px; }
 
@@ -92,7 +140,13 @@
         {% if messages %}
             {% for message in messages %}
                 <div class="message {{ message.role }}">
-                    <div class="bubble">{{ message.content }}</div>
+                    <div class="bubble">
+                        {% if message.role == "assistant" %}
+                            {{ message.content|render_answer }}
+                        {% else %}
+                            {{ message.content|linebreaksbr }}
+                        {% endif %}
+                    </div>
                     <span class="time">{{ message.created_at|date:"H:i" }}</span>
                 </div>
             {% endfor %}
