@@ -6,7 +6,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/manage.py",
-            "args": ["runserver", "9002"],
+            "args": ["runserver", "9001"],
             "django": true,
             "justMyCode": true,
             "env": {

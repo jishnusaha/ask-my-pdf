@@ -177,7 +177,7 @@ python manage.py runserver
 
 > **Note:** On first run, the reranker model (~80MB) will be automatically downloaded from HuggingFace and cached locally at `~/.cache/huggingface/hub/`. Subsequent starts load from cache instantly.
 
-Visit `http://localhost:8000/chats/`
+Visit `http://localhost:9001/chats/`
 
 ---
 
@@ -249,7 +249,7 @@ Each retrieved chunk is injected into the prompt with a `[Page N]` marker, and t
 | `POSTGRES_HOST` | PostgreSQL host (e.g. `localhost`) |
 | `POSTGRES_PORT` | PostgreSQL port (e.g. `5432`) |
 | `ALLOWED_HOSTS` | Comma-separated list of allowed hosts (e.g. `localhost,127.0.0.1`) |
-| `CSRF_TRUSTED_ORIGINS` | Trusted origins for CSRF (e.g. `http://localhost:8000`) |
+| `CSRF_TRUSTED_ORIGINS` | Trusted origins for CSRF (e.g. `http://localhost:9001`) |
 
 
 ---
