@@ -27,13 +27,16 @@ python manage.py test
 
 ## Architecture
 
-Django monolith with a RAG pipeline implemented as a service layer. No DRF — views use plain `django.views.View` and return rendered templates or redirects.
+Django monolith with a RAG pipeline implemented as a service layer. Template views (GET only) render pages; all mutations are handled by a DRF API layer under `chats/api/`.
 
-**Data flow — PDF ingestion:**
-`ChatListCreateView.post` → `parser.extract_text_by_page` → `embedder.chunk_pages` → `embedder.embed_chunks` → `ingestor.ingest_chunks` (atomic DB write)
+**Data flow — PDF ingestion (API):**
+`ChatListCreateAPIView.post` → `parser.extract_text_by_page` → `embedder.chunk_pages` → `embedder.embed_chunks` → `ingestor.ingest_chunks` (atomic DB write)
 
-**Data flow — question answering:**
-`ChatDetailView.post` → `pipeline.ask()` → query rewrite → vector retrieval → cross-encoder rerank → token-aware prompt build → LLM call → `ChatMessage.bulk_create`
+**Data flow — question answering (API):**
+`MessageListCreateAPIView.post` → `pipeline.ask()` → query rewrite → vector retrieval → cross-encoder rerank → token-aware prompt build → LLM call → `ChatMessage.bulk_create`
+
+**Data flow — PDF re-upload (API):**
+`ChatReuploadAPIView.post` → `parser.extract_text_by_page` → `embedder.chunk_pages` → hash comparison → embed only new/changed chunks → `ingestor.reingest_chunks` (atomic replace, chat history preserved)
 
 ### RAG service layer (`chats/services/rag/`)
 
@@ -64,11 +67,23 @@ PostgreSQL with the `pgvector` extension is required — SQLite is not supported
 
 ### URL structure
 
+**Template views** (GET only — render pages):
+
 | URL | View | Purpose |
 |---|---|---|
-| `/chats/` | `ChatListCreateView` | Upload PDF / list chats |
-| `/chats/<pk>/` | `ChatDetailView` | Chat UI + submit questions |
-| `/chats/<pk>/chunks/` | `ChatChunksView` | JSON API for inspecting stored chunks (paginated with `limit`/`offset`) |
+| `/chats/` | `ChatListView` | List chats / upload page |
+| `/chats/<pk>/` | `ChatDetailView` | Chat UI |
+
+**DRF API** (all mutations, under `/chats/api/`):
+
+| Method | URL | View | Purpose |
+|---|---|---|---|
+| `GET` | `/chats/api/` | `ChatListCreateAPIView` | List all chats |
+| `POST` | `/chats/api/` | `ChatListCreateAPIView` | Upload PDF + create chat |
+| `GET` | `/chats/api/<pk>/messages/` | `MessageListCreateAPIView` | List messages for a chat |
+| `POST` | `/chats/api/<pk>/messages/` | `MessageListCreateAPIView` | Send a question (returns `[user, assistant]`) |
+| `POST` | `/chats/api/<pk>/reupload/` | `ChatReuploadAPIView` | Replace PDF for an existing chat |
+| `GET` | `/chats/api/<pk>/chunks/` | `ChunkListAPIView` | List stored chunks (paginated, `limit`/`offset`) |
 
 ### Environment variables
 
