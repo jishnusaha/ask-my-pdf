@@ -15,6 +15,7 @@ class DocumentChunk(models.Model):
     content = models.TextField()
     page_number = models.IntegerField()
     chunk_index = models.IntegerField()
+    content_hash = models.CharField(max_length=64, blank=True, default="")
     embedding = VectorField(dimensions=1536)
 
     class Meta:

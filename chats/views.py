@@ -4,7 +4,7 @@ from django.views import View
 from chats.models import Chat
 from chats.services.rag.parser import extract_text_by_page
 from chats.services.rag.embedder import chunk_pages, embed_chunks
-from chats.services.rag.ingestor import ingest_chunks
+from chats.services.rag.ingestor import ingest_chunks, reingest_chunks
 from chats.services.rag.pipeline import ask
 
 
@@ -52,6 +52,21 @@ class ChatDetailView(View):
         return redirect("chat_detail", pk=pk)
 
 
+class ChatReuploadView(View):
+    def post(self, request, pk):
+        chat = get_object_or_404(Chat, pk=pk)
+        file = request.FILES.get("pdf")
+
+        if not file:
+            return redirect("chat_detail", pk=pk)
+
+        pages = extract_text_by_page(file)
+        chunks = chunk_pages(pages)
+        reingest_chunks(chat, chunks)
+
+        return redirect("chat_detail", pk=pk)
+
+
 class ChatChunksView(View):
     def get(self, request, pk):
         chat = get_object_or_404(Chat, pk=pk)
@@ -60,16 +75,22 @@ class ChatChunksView(View):
             limit = int(request.GET.get("limit", 20))
             offset = int(request.GET.get("offset", 0))
         except ValueError:
-            return JsonResponse({"error": "limit and offset must be integers"}, status=400)
+            return JsonResponse(
+                {"error": "limit and offset must be integers"}, status=400
+            )
 
-        qs = chat.chunks.values("id", "content", "page_number", "chunk_index")
+        qs = chat.chunks.values(
+            "id", "content", "page_number", "chunk_index", "content_hash"
+        )
         total = qs.count()
         chunks = list(qs[offset : offset + limit])
 
-        return JsonResponse({
-            "chat_id": pk,
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-            "chunks": chunks,
-        })
+        return JsonResponse(
+            {
+                "chat_id": pk,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "chunks": chunks,
+            }
+        )

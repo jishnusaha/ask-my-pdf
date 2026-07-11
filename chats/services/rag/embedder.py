@@ -1,3 +1,5 @@
+import hashlib
+
 from pgvector.django import CosineDistance
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -32,6 +34,7 @@ def chunk_pages(pages: list[PageData]) -> list[ChunkData]:
                     page_number=page.page_number,
                     chunk_index=len(chunks),
                     text=text,
+                    content_hash=hashlib.sha256(text.encode()).hexdigest(),
                 )
             )
 
@@ -46,14 +49,19 @@ def embed_chunks(chunks: list[ChunkData]):
     Returns:
         list: A list of embeddings corresponding to the input chunks.
     """
-    texts = [chunk.text for chunk in chunks]
+    to_embed = [chunk for chunk in chunks if chunk.embedding is None]
+
+    if not to_embed:
+        return chunks
+
+    texts = [chunk.text for chunk in to_embed]
 
     # single batch API call — much cheaper than one call per chunk,
     # langchain handles batching internally, so we don't have to worry about it.
     # default batch size is 1000(may vary)
     vectors = embeddings_model.embed_documents(texts)
 
-    for chunk, vector in zip(chunks, vectors):
+    for chunk, vector in zip(to_embed, vectors):
         chunk.embedding = vector
 
     return chunks

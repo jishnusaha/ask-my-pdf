@@ -18,4 +18,5 @@ class ChunkData(BaseModel):
     page_number: int
     chunk_index: int
     text: str
+    content_hash: str = ""
     embedding: Optional[List[float]] = None

@@ -129,12 +129,52 @@
     color: #555;
     font-size: 14px;
 }
+
+#reupload-section {
+    padding: 8px 24px;
+    border-bottom: 1px solid #2a2a2a;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+#reupload-section form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+#reupload-section input[type="file"] {
+    font-size: 12px;
+    color: #aaa;
+}
+
+#reupload-section button {
+    padding: 5px 12px;
+    background: #2a2a2a;
+    color: #aaa;
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+#reupload-section button:hover { background: #3a3a3a; color: #fff; }
 {% endblock %}
 
 {% block main %}
 <div id="chat-container">
 
     <div id="chat-header">{{ chat.title }}</div>
+
+    <div id="reupload-section">
+        <span style="font-size:12px; color:#555;">Replace PDF:</span>
+        <form method="POST" action="{% url 'chat_reupload' chat.id %}" enctype="multipart/form-data">
+            {% csrf_token %}
+            <input type="file" name="pdf" accept=".pdf" required>
+            <button type="submit">Re-upload</button>
+        </form>
+    </div>
 
     <div id="messages">
         {% if messages %}
