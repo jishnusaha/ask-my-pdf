@@ -14,14 +14,17 @@ AskMyPDF uses a RAG (Retrieval-Augmented Generation) pipeline to extract, chunk,
 ## Features
 
 - Upload a PDF and process it in one step
-- Chat with your PDF using natural language
+- Chat with your PDF using natural language — messages stream into the UI without page reloads
+- Interactive UI throughout — loading indicators on upload, animated "thinking" indicator while the AI responds, inline status for re-upload
 - Resume previous chats — full conversation history preserved
+- Re-upload an updated PDF to an existing chat — unchanged chunks are detected by content hash and reused, avoiding redundant embedding API calls
 - Answers grounded strictly in PDF content, no hallucination
 - Inline page citations — every answer cites the exact PDF pages it draws from, rendered as badges
 - Markdown-formatted answers (bold, lists, code) rendered cleanly in the chat UI
 - Query rewriting for accurate retrieval on follow-up questions
 - Cross-encoder reranking to filter and reorder chunks by true relevance
 - Token budget management to handle long conversations safely
+- REST API layer — all mutations exposed as JSON endpoints under `/chats/api/`
 
 ---
 
@@ -31,8 +34,16 @@ AskMyPDF uses a RAG (Retrieval-Augmented Generation) pipeline to extract, chunk,
 PDF Upload
   → extract text page by page              (pypdf)
   → split into overlapping chunks           (LangChain RecursiveCharacterTextSplitter)
+  → compute SHA-256 hash per chunk
   → batch embed chunks                      (OpenAI text-embedding-3-small)
-  → store chunks + vectors in DB            (pgvector)
+  → store chunks + vectors + hashes in DB   (pgvector)
+
+PDF Re-upload (existing chat)
+  → extract + split + hash new chunks
+  → compare hashes against stored chunks
+  → reuse stored embeddings for unchanged chunks (no API call)
+  → embed only new/changed chunks           (OpenAI text-embedding-3-small)
+  → atomically replace all chunks           (chat history preserved)
 
 User Question
   → rewrite query using chat history        (resolves pronouns for better retrieval)
@@ -72,8 +83,13 @@ ask-my-pdf/
 │   └── wsgi.py
 ├── chats/                    # main app
 │   ├── models.py             # Chat, DocumentChunk, ChatMessage
-│   ├── views.py              # ChatListCreateView, ChatDetailView
+│   ├── views.py              # template views (GET only — render pages)
 │   ├── urls.py
+│   ├── api/                  # DRF API layer
+│   │   ├── __init__.py
+│   │   ├── serializers.py    # ChatSerializer, ChatMessageSerializer, ChatCreateSerializer, etc.
+│   │   ├── views.py          # ChatListCreateAPIView, MessageListCreateAPIView, ChatReuploadAPIView, ChunkListAPIView
+│   │   └── urls.py           # all routes under /chats/api/
 │   ├── services/
 │   │   └── rag/
 │   │       ├── __init__.py
@@ -193,6 +209,7 @@ DocumentChunk
   ├── content          ← raw text, source of truth
   ├── page_number
   ├── chunk_index
+  ├── content_hash     ← SHA-256 of content, used for re-upload deduplication
   └── embedding        ← 1536-dim vector (pgvector)
 
 ChatMessage
@@ -214,9 +231,9 @@ The pipeline is organized as a clean package under `chats/services/rag/`, each f
 | `prompts.py` | `ChatPromptTemplate` for query rewriting and answer generation |
 | `query_rewriter.py` | Rewrites follow-up questions into standalone retrieval queries |
 | `reranker.py` | Cross-encoder scoring, reordering, and filtering of retrieved chunks |
-| `embedder.py` | Chunks, embeds, and retrieves document chunks via pgvector |
+| `embedder.py` | Chunks (with SHA-256 hashing), embeds (skips pre-populated embeddings), and retrieves document chunks via pgvector |
 | `generate_response.py` | Builds prompt with token-aware history trimming, calls LLM |
-| `ingestor.py` | Atomically saves Chat and all DocumentChunks to DB |
+| `ingestor.py` | `ingest_chunks` atomically creates a new Chat + chunks; `reingest_chunks` replaces chunks on an existing Chat with embedding reuse |
 | `parser.py` | Extracts text from PDF page by page (pypdf); renders answers (markdown + `[Page N]` citations) into safe HTML for display |
 | `pipeline.py` | Orchestrates the full ask() flow |
 
@@ -260,12 +277,22 @@ Each retrieved chunk is injected into the prompt with a `[Page N]` marker, and t
 flowchart TD
 Start --> |Create New Chat| B[Submit PDF File]
 B --> C[Extract PDF Text]
-C --> D[Create Chunks]
-D --> E[Embed Chunks]
-E --> F[Save To Db]
+C --> D[Create Chunks + Compute Hashes]
+D --> E[Embed All Chunks]
+E --> F[Save To DB]
 F --> A1[User Ask Question]
 
 Start --> |Resume Previous Chat| A1
+
+Start --> |Re-upload PDF| R1[Submit Updated PDF]
+R1 --> R26[Extract PDF Text]
+R26 --> R2[Create Chunks + Compute Hashes]
+R2 --> R3[Match existing emmeding with hash to reuse]
+R3 --> |Hash found with embeding| R4[Reuse Stored Embedding]
+R3 --> |Hash not found with embeding| R5[Embed Chunk]
+R4 & R5 --> R6[Atomically Replace Chunks]
+R6 --> A1
+
 A1 --> B1[Rewrite Query]
 B1 --> C1[Embed Rewritten Query]
 C1 --> D1[Vector Search]
@@ -282,11 +309,27 @@ J1 --> K1[Return Answer]
 ---
 
 
+## API Endpoints
+
+All mutation operations are exposed as a REST API under `/chats/api/`. The template views at `/chats/<pk>/` remain for page rendering; the frontend calls the API via `fetch()`.
+
+| Method | URL | Description |
+|---|---|---|
+| `GET` | `/chats/api/` | List all chats |
+| `POST` | `/chats/api/` | Upload a PDF and create a new chat |
+| `GET` | `/chats/api/<pk>/messages/` | List all messages for a chat |
+| `POST` | `/chats/api/<pk>/messages/` | Send a question — returns `[user, assistant]` messages |
+| `POST` | `/chats/api/<pk>/reupload/` | Replace the PDF for an existing chat |
+| `GET` | `/chats/api/<pk>/chunks/` | List stored chunks (paginated, `limit`/`offset`) |
+
+---
+
 ## Future Improvement Plans
 
 - [x] Source citation with page numbers
+- [x] Re-upload updated PDF with content-hash deduplication
+- [x] Interactive UI with REST API (no full-page reloads)
 - [ ] Streaming responses
 - [ ] Multi-PDF support per chat
 - [ ] User authentication
-- [ ] File upload progress indicator
 - [ ] Export chat history
