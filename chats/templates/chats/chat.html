@@ -87,7 +87,27 @@
 }
 .citation .citation-icon { font-size: 10px; }
 
-.thinking .bubble { color: #555; font-style: italic; }
+.thinking .bubble {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 14px 18px;
+}
+
+.thinking .bubble .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #6c63ff;
+    animation: pulse-dot 1.2s ease-in-out infinite;
+}
+.thinking .bubble .dot:nth-child(2) { animation-delay: 0.2s; }
+.thinking .bubble .dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes pulse-dot {
+    0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); }
+    40%            { opacity: 1;   transform: scale(1); }
+}
 
 .message .time { font-size: 11px; color: #555; padding: 0 4px; }
 
@@ -239,7 +259,7 @@
         wrapper.className = 'message assistant thinking';
         const bubble = document.createElement('div');
         bubble.className = 'bubble';
-        bubble.textContent = 'Thinking…';
+        bubble.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
         wrapper.appendChild(bubble);
         messagesEl.appendChild(wrapper);
         messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -256,6 +276,13 @@
 
         questionInput.value = '';
         sendBtn.disabled = true;
+
+        appendMessage({
+            role: 'user',
+            content: question,
+            content_html: null,
+            created_at: new Date().toISOString(),
+        });
 
         const thinking = appendThinking();
 
@@ -274,7 +301,7 @@
             }
 
             const newMessages = await response.json();
-            newMessages.forEach(appendMessage);
+            newMessages.filter(m => m.role !== 'user').forEach(appendMessage);
         } catch (e) {
             thinking.remove();
             appendMessage({
