@@ -1,3 +1,4 @@
+from django.http import JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.views import View
 from chats.models import Chat
@@ -49,3 +50,26 @@ class ChatDetailView(View):
         ask(pk, question, list(chat.messages.all()))
 
         return redirect("chat_detail", pk=pk)
+
+
+class ChatChunksView(View):
+    def get(self, request, pk):
+        chat = get_object_or_404(Chat, pk=pk)
+
+        try:
+            limit = int(request.GET.get("limit", 20))
+            offset = int(request.GET.get("offset", 0))
+        except ValueError:
+            return JsonResponse({"error": "limit and offset must be integers"}, status=400)
+
+        qs = chat.chunks.values("id", "content", "page_number", "chunk_index")
+        total = qs.count()
+        chunks = list(qs[offset : offset + limit])
+
+        return JsonResponse({
+            "chat_id": pk,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "chunks": chunks,
+        })

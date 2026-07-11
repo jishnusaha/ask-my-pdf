@@ -7,7 +7,7 @@ from chats.models import DocumentChunk
 from .types import ChunkData, PageData
 
 # initialize once at module level — no need to recreate on every call
-splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=100)
+splitter = RecursiveCharacterTextSplitter(chunk_size=1600, chunk_overlap=200)
 
 embeddings_model = OpenAIEmbeddings(
     model="text-embedding-3-small",  # 1536 dimensions, cheap
