@@ -87,6 +87,8 @@
 }
 .citation .citation-icon { font-size: 10px; }
 
+.thinking .bubble { color: #555; font-style: italic; }
+
 .message .time { font-size: 11px; color: #555; padding: 0 4px; }
 
 #input-area {
@@ -119,7 +121,8 @@
     font-size: 14px;
 }
 
-#input-area button:hover { background: #5a52e0; }
+#input-area button:hover:not(:disabled) { background: #5a52e0; }
+#input-area button:disabled { opacity: 0.6; cursor: not-allowed; }
 
 #empty-state {
     flex: 1;
@@ -138,18 +141,12 @@
     gap: 10px;
 }
 
-#reupload-section form {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-}
-
 #reupload-section input[type="file"] {
     font-size: 12px;
     color: #aaa;
 }
 
-#reupload-section button {
+#reupload-btn {
     padding: 5px 12px;
     background: #2a2a2a;
     color: #aaa;
@@ -159,7 +156,9 @@
     cursor: pointer;
 }
 
-#reupload-section button:hover { background: #3a3a3a; color: #fff; }
+#reupload-btn:hover:not(:disabled) { background: #3a3a3a; color: #fff; }
+#reupload-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+#reupload-status { font-size: 12px; color: #aaa; }
 {% endblock %}
 
 {% block main %}
@@ -169,11 +168,9 @@
 
     <div id="reupload-section">
         <span style="font-size:12px; color:#555;">Replace PDF:</span>
-        <form method="POST" action="{% url 'chat_reupload' chat.id %}" enctype="multipart/form-data">
-            {% csrf_token %}
-            <input type="file" name="pdf" accept=".pdf" required>
-            <button type="submit">Re-upload</button>
-        </form>
+        <input type="file" id="reupload-input" accept=".pdf">
+        <button id="reupload-btn" type="button">Re-upload</button>
+        <span id="reupload-status"></span>
     </div>
 
     <div id="messages">
@@ -196,24 +193,148 @@
     </div>
 
     <div id="input-area">
-        <form method="POST" style="display:flex; gap:10px; flex:1;">
-            {% csrf_token %}
-            <input
-                type="text"
-                name="question"
-                placeholder="Ask a question..."
-                required
-                autofocus
-            >
-            <button type="submit">Send</button>
-        </form>
+        <input
+            type="text"
+            id="question-input"
+            placeholder="Ask a question..."
+            autofocus
+        >
+        <button id="send-btn" type="button">Send</button>
     </div>
 
 </div>
 
 <script>
+    const CHAT_ID = {{ chat.id }};
+    const messagesEl = document.getElementById('messages');
+
+    function appendMessage(msg) {
+        const empty = document.getElementById('empty-state');
+        if (empty) empty.remove();
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'message ' + msg.role;
+
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        if (msg.role === 'assistant' && msg.content_html) {
+            bubble.innerHTML = msg.content_html;
+        } else {
+            bubble.textContent = msg.content;
+        }
+
+        const time = document.createElement('span');
+        time.className = 'time';
+        const d = new Date(msg.created_at);
+        time.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        wrapper.appendChild(bubble);
+        wrapper.appendChild(time);
+        messagesEl.appendChild(wrapper);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function appendThinking() {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'message assistant thinking';
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = 'Thinking…';
+        wrapper.appendChild(bubble);
+        messagesEl.appendChild(wrapper);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        return wrapper;
+    }
+
+    // ── Send question ──
+    const sendBtn = document.getElementById('send-btn');
+    const questionInput = document.getElementById('question-input');
+
+    async function sendQuestion() {
+        const question = questionInput.value.trim();
+        if (!question) return;
+
+        questionInput.value = '';
+        sendBtn.disabled = true;
+
+        const thinking = appendThinking();
+
+        try {
+            const response = await fetch(`/chats/api/${CHAT_ID}/messages/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question }),
+            });
+
+            thinking.remove();
+
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(JSON.stringify(err));
+            }
+
+            const newMessages = await response.json();
+            newMessages.forEach(appendMessage);
+        } catch (e) {
+            thinking.remove();
+            appendMessage({
+                role: 'assistant',
+                content: 'Error: ' + e.message,
+                content_html: null,
+                created_at: new Date().toISOString(),
+            });
+        } finally {
+            sendBtn.disabled = false;
+            questionInput.focus();
+        }
+    }
+
+    sendBtn.addEventListener('click', sendQuestion);
+    questionInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendQuestion();
+        }
+    });
+
+    // ── Re-upload PDF ──
+    const reuploadBtn = document.getElementById('reupload-btn');
+    const reuploadStatus = document.getElementById('reupload-status');
+
+    reuploadBtn.addEventListener('click', async () => {
+        const file = document.getElementById('reupload-input').files[0];
+        if (!file) {
+            reuploadStatus.textContent = 'Select a PDF file first.';
+            return;
+        }
+
+        reuploadBtn.disabled = true;
+        reuploadStatus.textContent = 'Re-uploading…';
+
+        const formData = new FormData();
+        formData.append('pdf', file);
+
+        try {
+            const response = await fetch(`/chats/api/${CHAT_ID}/reupload/`, {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(JSON.stringify(err));
+            }
+
+            reuploadStatus.textContent = 'PDF replaced successfully.';
+            document.getElementById('reupload-input').value = '';
+        } catch (e) {
+            reuploadStatus.textContent = 'Re-upload failed: ' + e.message;
+        } finally {
+            reuploadBtn.disabled = false;
+        }
+    });
+
     // auto scroll to bottom on load
-    const messages = document.getElementById("messages");
-    messages.scrollTop = messages.scrollHeight;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
 </script>
 {% endblock %}

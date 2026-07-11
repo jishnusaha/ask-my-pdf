@@ -42,7 +42,11 @@
     cursor: pointer;
 }
 
-#upload-form button:hover { background: #5a52e0; }
+#upload-form button:hover:not(:disabled) { background: #5a52e0; }
+#upload-form button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+#upload-status { font-size: 13px; color: #aaa; min-height: 18px; }
+#upload-error  { font-size: 13px; color: #ff6b6b; min-height: 18px; }
 {% endblock %}
 
 {% block main %}
@@ -50,11 +54,56 @@
     <h2>AskMyPDF</h2>
     <p>Upload a PDF to start a new chat</p>
 
-    <form id="upload-form" method="POST" enctype="multipart/form-data">
-        {% csrf_token %}
-        <input type="text" name="title" placeholder="Title (optional)">
-        <input type="file" name="pdf" accept=".pdf" required>
-        <button type="submit">Upload & Start Chat</button>
-    </form>
+    <div id="upload-form">
+        <input type="text" id="title-input" placeholder="Title (optional)">
+        <input type="file" id="pdf-input" accept=".pdf">
+        <button id="upload-btn" type="button">Upload &amp; Start Chat</button>
+        <span id="upload-status"></span>
+        <span id="upload-error"></span>
+    </div>
 </div>
+
+<script>
+    document.getElementById('upload-btn').addEventListener('click', async () => {
+        const pdfFile = document.getElementById('pdf-input').files[0];
+        if (!pdfFile) {
+            document.getElementById('upload-error').textContent = 'Please select a PDF file.';
+            return;
+        }
+
+        const btn = document.getElementById('upload-btn');
+        const statusEl = document.getElementById('upload-status');
+        const errorEl = document.getElementById('upload-error');
+
+        btn.disabled = true;
+        btn.textContent = 'Uploading…';
+        statusEl.textContent = 'Processing PDF, please wait…';
+        errorEl.textContent = '';
+
+        const formData = new FormData();
+        formData.append('pdf', pdfFile);
+        const title = document.getElementById('title-input').value.trim();
+        if (title) formData.append('title', title);
+
+        try {
+            const response = await fetch('/chats/api/', {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(JSON.stringify(err));
+            }
+
+            const chat = await response.json();
+            window.location.href = `/chats/${chat.id}/`;
+        } catch (e) {
+            errorEl.textContent = 'Upload failed: ' + e.message;
+            btn.disabled = false;
+            btn.textContent = 'Upload & Start Chat';
+            statusEl.textContent = '';
+        }
+    });
+</script>
 {% endblock %}
