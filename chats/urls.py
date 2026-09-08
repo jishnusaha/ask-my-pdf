@@ -1,10 +1,9 @@
 from django.urls import path, include
-from chats.views import ChatDetailView, ChatListCreateView, ChatChunksView, ChatReuploadView
+
+from chats.views import ChatListView, ChatDetailView
 
 urlpatterns = [
-    path("", ChatListCreateView.as_view(), name="chat_list_create"),
+    path("", ChatListView.as_view(), name="chat_list"),
     path("<int:pk>/", ChatDetailView.as_view(), name="chat_detail"),
-    path("<int:pk>/chunks/", ChatChunksView.as_view(), name="chat_chunks"),
-    path("<int:pk>/reupload/", ChatReuploadView.as_view(), name="chat_reupload"),
     path("api/", include("chats.api.urls")),
 ]

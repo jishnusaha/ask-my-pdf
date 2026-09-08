@@ -25,7 +25,7 @@ class ChatListCreateAPIView(generics.ListCreateAPIView):
         return ChatCreateSerializer if self.request.method == "POST" else ChatSerializer
 
     def create(self, request, *args, **kwargs):
-        serializer = ChatCreateSerializer(data=request.data)
+        serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         chat = serializer.save()
         return Response(ChatSerializer(chat).data, status=status.HTTP_201_CREATED)
@@ -46,11 +46,16 @@ class MessageListCreateAPIView(generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         question = serializer.validated_data["question"]
 
-        last_id = chat.messages.order_by("-id").values_list("id", flat=True).first() or 0
+        last_id = (
+            chat.messages.order_by("-id").values_list("id", flat=True).first() or 0
+        )
         ask(chat.pk, question, list(chat.messages.all()))
         new_messages = chat.messages.filter(id__gt=last_id).order_by("id")
 
-        return Response(ChatMessageSerializer(new_messages, many=True).data, status=status.HTTP_201_CREATED)
+        return Response(
+            ChatMessageSerializer(new_messages, many=True).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class ChatReuploadAPIView(APIView):
@@ -58,7 +63,10 @@ class ChatReuploadAPIView(APIView):
         chat = get_object_or_404(Chat, pk=pk)
         file = request.FILES.get("pdf")
         if not file:
-            return Response({"error": "No PDF file provided."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "No PDF file provided."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         pages = extract_text_by_page(file)
         chunks = chunk_pages(pages)
