@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Start the database (required before running the server)
+# Start the database (required before running the server or any DB-touching command)
 docker compose up -d
 
 # Install dependencies
@@ -14,29 +14,40 @@ uv sync
 # Run database migrations
 python manage.py migrate
 
-# Start the development server (runs on port 9001 by default per CSRF config)
-python manage.py runserver
+# Start the development server.
+# `runserver` alone binds 127.0.0.1:8000, which does NOT match the default
+# CSRF_TRUSTED_ORIGINS (http://127.0.0.1:9001) — pass the port explicitly.
+# The VS Code "Django" launch config already passes 9001.
+python manage.py runserver 9001
 
 # Lint with ruff
 uv run ruff check .
 uv run ruff format .
 
-# Run tests
+# Run tests — see "Tests" below: there is no suite yet, this collects nothing.
 python manage.py test
 ```
+
+Every management command imports the RAG service layer, which loads the ~80MB
+cross-encoder into memory before the command runs. Expect a few seconds of
+startup on even `manage.py check`.
+
+`uv run ruff check .` currently reports 2 pre-existing `F401` errors, both in
+untouched Django scaffolding (`chats/admin.py`, `chats/tests.py`). They are not
+regressions from recent work.
 
 ## Architecture
 
 Django monolith with a RAG pipeline implemented as a service layer. Template views (GET only) render pages; all mutations are handled by a DRF API layer under `chats/api/`.
 
 **Data flow — PDF ingestion (API):**
-`ChatListCreateAPIView.post` → `parser.extract_text_by_page` → `embedder.chunk_pages` → `embedder.embed_chunks` → `ingestor.ingest_chunks` (atomic DB write)
+`ChatListCreateAPIView.create` → `serializer.save()` → **`ChatCreateSerializer.create`** does the real work: `parser.extract_text_by_page` → `embedder.chunk_pages` (also computes the SHA-256 `content_hash`) → `embedder.embed_chunks` → `ingestor.ingest_chunks` (atomic DB write). The view itself only re-serializes the result with `ChatSerializer` and returns 201.
 
 **Data flow — question answering (API):**
-`MessageListCreateAPIView.post` → `pipeline.ask()` → query rewrite → vector retrieval → cross-encoder rerank → token-aware prompt build → LLM call → `ChatMessage.bulk_create`
+`MessageListCreateAPIView.create` → `pipeline.ask()` → query rewrite → vector retrieval (top `k=5`) → cross-encoder rerank → token-aware prompt build → LLM call → `ChatMessage.bulk_create`. `ask()` returns nothing; the view captures the new rows by recording `last_id` before the call and re-querying `id__gt=last_id` afterwards.
 
 **Data flow — PDF re-upload (API):**
-`ChatReuploadAPIView.post` → `parser.extract_text_by_page` → `embedder.chunk_pages` → hash comparison → embed only new/changed chunks → `ingestor.reingest_chunks` (atomic replace, chat history preserved)
+`ChatReuploadAPIView.post` → `parser.extract_text_by_page` → `embedder.chunk_pages` → `ingestor.reingest_chunks`. Hash comparison and selective embedding happen *inside* `reingest_chunks`, not as separate steps in the view: it builds a `content_hash → embedding` map from the existing rows (deliberately outside the transaction, so no DB lock is held across the OpenAI call), reuses embeddings for unchanged text, embeds only new/changed chunks, then atomically deletes and re-creates all chunks. Chat history is untouched.
 
 ### RAG service layer (`chats/services/rag/`)
 
@@ -44,47 +55,75 @@ Each file has exactly one responsibility:
 
 | File | Responsibility |
 |---|---|
-| `config.py` | Model name (`gpt-4.1-mini`), `TOKEN_LIMIT`, `TOKEN_BUFFER`, `RERANK_THRESHOLD`, shared `llm` instance |
-| `types.py` | Pydantic `PageData` and `ChunkData` dataclasses (strict `extra="forbid"`) |
+| `config.py` | `MODEL_NAME` (`gpt-4.1-mini`), `TOKEN_LIMIT`, `TOKEN_BUFFER`, `RERANK_THRESHOLD`, the single shared `llm` instance (`ChatOpenAI`, `temperature=0.2`) |
+| `prompts.py` | The two `ChatPromptTemplate`s: `query_rewriter_prompt` and `answer_generation_prompt` (the latter carries the citation rules), plus an unused `SYSTEM_PROMPT` string |
+| `types.py` | Pydantic `BaseModel`s `PageData` and `ChunkData` (strict `extra="forbid"`); `ChunkData` also carries `content_hash` and an optional `embedding` |
 | `parser.py` | PDF text extraction via `pypdf`; `render_answer()` converts raw markdown + `[Page N]` markers to safe HTML |
-| `embedder.py` | Chunking (`RecursiveCharacterTextSplitter`, 1600/200), batch embedding (`text-embedding-3-small`), pgvector cosine retrieval |
-| `ingestor.py` | Atomic `Chat` + `DocumentChunk` DB save |
-| `query_rewriter.py` | Rewrites follow-up questions into standalone retrieval queries using LLM |
-| `reranker.py` | Cross-encoder scoring (`cross-encoder/ms-marco-MiniLM-L-6-v2`), filters below `RERANK_THRESHOLD=3`, fallback to top chunk |
+| `embedder.py` | Chunking (`RecursiveCharacterTextSplitter`, 1600/200) with SHA-256 hashing, batch embedding (`text-embedding-3-small`, skips chunks that already have an embedding), pgvector cosine retrieval |
+| `ingestor.py` | `ingest_chunks` — atomic new `Chat` + `DocumentChunk` save; `reingest_chunks` — hash-based embedding reuse then atomic chunk replacement on an existing `Chat` |
+| `query_rewriter.py` | Rewrites follow-up questions into standalone retrieval queries, using the last 6 history messages; returns the original query unchanged when there is no history |
+| `reranker.py` | Cross-encoder scoring (`cross-encoder/ms-marco-MiniLM-L-6-v2`), filters below `RERANK_THRESHOLD=3`, falls back to the top chunk if everything is filtered |
 | `generate_response.py` | Token budget trimming (drops oldest history first), LangChain chain invocation |
 | `pipeline.py` | Orchestrates the full `ask()` flow |
 
 ### Key design decisions
 
 - The `CrossEncoder` model and `OpenAIEmbeddings` / `splitter` instances are initialized once at module import time — they are singletons per Django worker process. The reranker model (~80MB) downloads from HuggingFace on first run and caches at `~/.cache/huggingface/hub/`.
-- `ChatMessage.content` stores raw markdown + `[Page N]` citation markers. Rendering to HTML happens at display time via the `render_answer` template filter (`chats/templatetags/chat_extras.py`).
+- **One LLM instance serves both calls.** `query_rewriter.py` and `generate_response.py` both import the same `llm` from `config.py`; there is no separate cheaper model for rewriting. Any change to `config.llm` affects both.
+- `TOKEN_BUFFER` does double duty: it is both the reserve subtracted from the history budget *and* the `max_tokens` output cap on the `llm` instance. Changing it changes both behaviors.
+- `ChatMessage.content` stores raw markdown + `[Page N]` citation markers. It is rendered to HTML in **two** places: the `render_answer` template filter (`chats/templatetags/chat_extras.py`) for server-rendered history, and `ChatMessageSerializer.content_html` for messages the JS appends live. Both call `parser.render_answer`; `content_html` is `null` for user messages.
 - `DocumentChunk.embedding` is a 1536-dim `VectorField` (pgvector). Vector similarity search uses `CosineDistance` from `pgvector.django`.
 - Token budget: `TOKEN_LIMIT (128000) - TOKEN_BUFFER (2000) - system_prompt_tokens - query_tokens = history budget`. If budget is exceeded, oldest messages are dropped.
+- **The uploaded PDF is never persisted.** It is parsed in memory and discarded; only the extracted chunks live in the DB. `MEDIA_URL` / `MEDIA_ROOT` are configured in settings but unused. Re-upload therefore requires the user to supply the file again, and there is nothing to serve back for download.
 
 ### Database
 
-PostgreSQL with the `pgvector` extension is required — SQLite is not supported. The Docker image `pgvector/pgvector:pg16` is used. Default port is `9002` (mapped to Postgres internal 5432).
+PostgreSQL with the `pgvector` extension is required — SQLite is not supported. The Docker image `pgvector/pgvector:pg16` is used. The extension is created by the app's own migration (`0001_initial` runs `CreateExtension("vector")`), so a bare Postgres database is fine as long as the role may create extensions.
+
+`docker-compose.yml` publishes `${POSTGRES_PORT}:5432` with no fallback — the port comes entirely from `.env`. This project uses **9002** by convention (README example and the running container).
+
+Migrations: `0001_initial` (extension + all three models), `0002_add_content_hash_to_documentchunk` (adds `content_hash` and backfills SHA-256 hashes for existing rows).
 
 ### URL structure
 
+There is **no route at `/`** — it returns 404. The entry point is `/chats/`. `/admin/` is mounted but no `django.contrib.admin` models are registered.
+
 **Template views** (GET only — render pages):
 
-| URL | View | Purpose |
-|---|---|---|
-| `/chats/` | `ChatListView` | List chats / upload page |
-| `/chats/<pk>/` | `ChatDetailView` | Chat UI |
+| URL | Name | View | Purpose |
+|---|---|---|---|
+| `/chats/` | `chat_list` | `ChatListView` | List chats / upload page |
+| `/chats/<pk>/` | `chat_detail` | `ChatDetailView` | Chat UI |
 
 **DRF API** (all mutations, under `/chats/api/`):
 
 | Method | URL | View | Purpose |
 |---|---|---|---|
 | `GET` | `/chats/api/` | `ChatListCreateAPIView` | List all chats |
-| `POST` | `/chats/api/` | `ChatListCreateAPIView` | Upload PDF + create chat |
+| `POST` | `/chats/api/` | `ChatListCreateAPIView` | Upload PDF + create chat (`pdf` file, optional `title`) |
 | `GET` | `/chats/api/<pk>/messages/` | `MessageListCreateAPIView` | List messages for a chat |
-| `POST` | `/chats/api/<pk>/messages/` | `MessageListCreateAPIView` | Send a question (returns `[user, assistant]`) |
-| `POST` | `/chats/api/<pk>/reupload/` | `ChatReuploadAPIView` | Replace PDF for an existing chat |
-| `GET` | `/chats/api/<pk>/chunks/` | `ChunkListAPIView` | List stored chunks (paginated, `limit`/`offset`) |
+| `POST` | `/chats/api/<pk>/messages/` | `MessageListCreateAPIView` | Send a question (`question`); returns a bare `[user, assistant]` list |
+| `POST` | `/chats/api/<pk>/reupload/` | `ChatReuploadAPIView` | Replace PDF for an existing chat (`pdf` file) |
+| `GET` | `/chats/api/<pk>/chunks/` | `ChunkListAPIView` | List stored chunks |
+
+### API behavior worth knowing
+
+- **All three GET list endpoints are paginated**, not just chunks. `DEFAULT_PAGINATION_CLASS = LimitOffsetPagination` with `PAGE_SIZE = 20` is global, so `/chats/api/`, `/chats/api/<pk>/messages/` and `/chats/api/<pk>/chunks/` all return `{"count", "next", "previous", "results"}` and all accept `limit`/`offset`. The `POST` to `/messages/` is the exception — it goes through `create()` and returns a plain list.
+- **The API is unauthenticated and effectively CSRF-exempt.** `DEFAULT_AUTHENTICATION_CLASSES` and `DEFAULT_PERMISSION_CLASSES` are both `[]`, so DRF never runs `SessionAuthentication.enforce_csrf`. POSTs without a CSRF token reach the view and are processed. This is why the templates' `fetch()` calls send no token. Anyone who can reach the server can read every chat and spend OpenAI credit; adding auth means adding CSRF handling to the templates' `fetch()` calls at the same time.
+- Chats have no owner field and no scoping — the sidebar lists every chat in the database for every visitor.
+
+### Tests
+
+There is **no test suite**. `chats/tests.py` is the unmodified Django stub, so `python manage.py test` collects zero tests. When writing the first test, note that `ALLOWED_HOSTS` defaults to `["127.0.0.1"]` only: Django's test client sends `Host: testserver` and will be rejected with `DisallowedHost` unless the test overrides the host or `ALLOWED_HOSTS`.
 
 ### Environment variables
 
-Loaded via `django-environ` from `.env` at project root. Required: `OPENAI_API_KEY`, `SECRET_KEY`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_PORT`. `ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS` default to `127.0.0.1` / `http://127.0.0.1:9001`.
+Loaded via `django-environ` from `.env` at project root.
+
+Required (no default — startup fails if missing): `SECRET_KEY`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_PORT`. `OPENAI_API_KEY` is not read by `settings.py` — the OpenAI SDK picks it up from the environment, so it is required at request time rather than at startup.
+
+Optional: `DEBUG` (default `False`), `ALLOWED_HOSTS` (default `127.0.0.1`), `CSRF_TRUSTED_ORIGINS` (default `http://127.0.0.1:9001`).
+
+---
+
+*Verified against `main` @ `ad83085`. Claims about routes, pagination shape, CSRF behavior, and the `runserver` default port were checked by executing them, not read from prior docs.*
