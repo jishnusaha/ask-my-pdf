@@ -109,6 +109,9 @@
     40%            { opacity: 1;   transform: scale(1); }
 }
 
+/* ── Raw text while the answer is still streaming in ── */
+.streaming .bubble { white-space: pre-wrap; }
+
 .message .time { font-size: 11px; color: #555; padding: 0 4px; }
 
 #input-area {
@@ -228,6 +231,9 @@
     const CHAT_ID = {{ chat.id }};
     const messagesEl = document.getElementById('messages');
 
+    const formatTime = (iso) =>
+        new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
     function appendMessage(msg) {
         const empty = document.getElementById('empty-state');
         if (empty) empty.remove();
@@ -245,13 +251,13 @@
 
         const time = document.createElement('span');
         time.className = 'time';
-        const d = new Date(msg.created_at);
-        time.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        time.textContent = formatTime(msg.created_at);
 
         wrapper.appendChild(bubble);
         wrapper.appendChild(time);
         messagesEl.appendChild(wrapper);
         messagesEl.scrollTop = messagesEl.scrollHeight;
+        return wrapper;
     }
 
     function appendThinking() {
@@ -264,6 +270,43 @@
         messagesEl.appendChild(wrapper);
         messagesEl.scrollTop = messagesEl.scrollHeight;
         return wrapper;
+    }
+
+    // ── SSE reader ──
+    // Yields { event, data } for each complete frame in a fetch() response body.
+    async function* readSSE(response) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        const parseFrame = (raw) => {
+            let event = 'message';
+            const dataLines = [];
+            for (const line of raw.split('\n')) {
+                if (line.startsWith(':')) continue;
+                if (line.startsWith('event:')) event = line.slice(6).trim();
+                else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
+            }
+            if (!dataLines.length) return null;
+            return { event, data: JSON.parse(dataLines.join('\n')) };
+        };
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+
+                let sep;
+                while ((sep = buffer.indexOf('\n\n')) !== -1) {
+                    const frame = parseFrame(buffer.slice(0, sep));
+                    buffer = buffer.slice(sep + 2);
+                    if (frame) yield frame;
+                }
+            }
+        } finally {
+            reader.cancel().catch(() => {});
+        }
     }
 
     // ── Send question ──
@@ -285,25 +328,69 @@
         });
 
         const thinking = appendThinking();
+        let streamWrapper = null;
+        let streamBubble = null;
+        let accumulated = '';
 
         try {
-            const response = await fetch(`/chats/api/${CHAT_ID}/messages/`, {
+            const response = await fetch(`/chats/api/${CHAT_ID}/messages/stream/`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream',
+                },
                 body: JSON.stringify({ question }),
             });
-
-            thinking.remove();
 
             if (!response.ok) {
                 const err = await response.json();
                 throw new Error(JSON.stringify(err));
             }
 
-            const newMessages = await response.json();
-            newMessages.filter(m => m.role !== 'user').forEach(appendMessage);
+            let finished = false;
+            for await (const { event, data } of readSSE(response)) {
+                if (event === 'token') {
+                    if (!streamWrapper) {
+                        thinking.remove();
+                        streamWrapper = appendMessage({
+                            role: 'assistant',
+                            content: '',
+                            content_html: null,
+                            created_at: new Date().toISOString(),
+                        });
+                        streamWrapper.classList.add('streaming');
+                        streamBubble = streamWrapper.querySelector('.bubble');
+                    }
+                    accumulated += data.delta;
+                    streamBubble.textContent = accumulated;
+                    messagesEl.scrollTop = messagesEl.scrollHeight;
+                } else if (event === 'done') {
+                    const assistantMsg = data.find(m => m.role === 'assistant');
+                    if (!assistantMsg) throw new Error('malformed response');
+                    thinking.remove();
+                    if (streamWrapper) {
+                        if (assistantMsg.content_html) {
+                            streamBubble.innerHTML = assistantMsg.content_html;
+                        } else {
+                            streamBubble.textContent = assistantMsg.content;
+                        }
+                        streamWrapper.classList.remove('streaming');
+                        streamWrapper.querySelector('.time').textContent = formatTime(assistantMsg.created_at);
+                        messagesEl.scrollTop = messagesEl.scrollHeight;
+                    } else {
+                        appendMessage(assistantMsg);
+                    }
+                    finished = true;
+                    break;
+                } else if (event === 'error') {
+                    throw new Error(data.detail);
+                }
+            }
+
+            if (!finished) throw new Error('connection lost');
         } catch (e) {
             thinking.remove();
+            if (streamWrapper) streamWrapper.remove();
             appendMessage({
                 role: 'assistant',
                 content: 'Error: ' + e.message,

@@ -53,7 +53,8 @@ User Question
   → trim chat history to fit token budget   (oldest messages dropped first)
   → build prompt with context + history
   → generate answer with inline [Page N] citations   (gpt-4.1-mini)
-  → save to chat history
+  → stream answer tokens to the browser     (Server-Sent Events; /messages/stream/)
+  → save to chat history                    (once the answer is complete)
   → render markdown + citation badges for display     (parser + template filter)
 ```
 
@@ -319,6 +320,7 @@ All mutation operations are exposed as a REST API under `/chats/api/`. The templ
 | `POST` | `/chats/api/` | Upload a PDF and create a new chat |
 | `GET` | `/chats/api/<pk>/messages/` | List all messages for a chat |
 | `POST` | `/chats/api/<pk>/messages/` | Send a question — returns `[user, assistant]` messages |
+| `POST` | `/chats/api/<pk>/messages/stream/` | Send a question — streams the answer as Server-Sent Events (`token` …, then `done` with `[user, assistant]`, or `error`). Used by the chat page. |
 | `POST` | `/chats/api/<pk>/reupload/` | Replace the PDF for an existing chat |
 | `GET` | `/chats/api/<pk>/chunks/` | List stored chunks (paginated, `limit`/`offset`) |
 
@@ -329,7 +331,7 @@ All mutation operations are exposed as a REST API under `/chats/api/`. The templ
 - [x] Source citation with page numbers
 - [x] Re-upload updated PDF with content-hash deduplication
 - [x] Interactive UI with REST API (no full-page reloads)
-- [ ] Streaming responses
+- [x] Streaming responses (Server-Sent Events)
 - [ ] Multi-PDF support per chat
 - [ ] User authentication
 - [ ] Export chat history

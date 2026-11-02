@@ -1,31 +1,34 @@
 # Decision log
 
-## 2026-08-23 — Anthropic for generation, OpenAI retained for embeddings
+## 2026-11-02 — OpenAI for every model call (replaces three incorrect 2026-08-23 entries)
 
-Answer generation and query rewriting moved to Anthropic (`claude-opus-5` and
-`claude-haiku-4-5`). Embeddings stay on OpenAI `text-embedding-3-small`.
-**Why:** Anthropic ships no embeddings API, so a full provider migration is not
-available. **Rules out:** treating "remove OpenAI" as achievable without also
-changing the vector dimension on `DocumentChunk.embedding` (1536), which would
-require a migration and a re-embed of every stored chunk. Revisit only if
-moving to Voyage AI or a local sentence-transformers model is worth that cost.
+The code uses OpenAI throughout:
+- Query rewriting and answer generation share the single `llm` in
+  `chats/services/rag/config.py`: `ChatOpenAI`, `gpt-4.1-mini`, `temperature=0.2`.
+- Embeddings use `text-embedding-3-small` (1536 dimensions).
+- History trimming counts tokens with tiktoken's encoding for `MODEL_NAME`,
+  which resolves to `o200k_base`. `cl100k_base` is only the `KeyError` fallback.
+- The budget ceiling is `TOKEN_LIMIT = 128000`.
 
-## 2026-08-23 — History trimming uses tiktoken cl100k_base, not Anthropic's tokenizer
+**Why this entry exists:** three entries dated 2026-08-23 described a migration
+to Anthropic that the code never had:
+- `claude-opus-5` for generation;
+- a second `rewrite_llm` client running `claude-haiku-4-5`;
+- `cl100k_base` as a stand-in for Anthropic's tokenizer, with a "1M context"
+  budget.
 
-`_count_tokens` approximates with `cl100k_base`. **Why:** Anthropic has no local
-tokenizer, and the accurate alternative (`client.messages.count_tokens`) is a
-network call — `_trim_history` counts once per history message, so it would add
-N round-trips per question. **Rules out:** treating the budget numbers as exact;
-`TOKEN_BUFFER` exists to absorb the drift. With a 1M context window the trimming
-path rarely binds anyway.
+`git log --all -G'[Aa]nthropic|rewrite_llm'` finds only the commit that
+created this log (`ad83085`), and `uv.lock` has no `anthropic` package. Those entries were
+deleted.
 
-## 2026-08-23 — Query rewriting routed to a separate, cheaper model
+**Still true from them:** replacing `text-embedding-3-small` with a model of a
+different dimension needs a migration on `DocumentChunk.embedding` (1536) and a
+re-embed of every stored chunk.
 
-`rewrite_llm` (Haiku 4.5) is a second client rather than reusing `llm`.
-**Why:** rewriting a follow-up into a standalone query is mechanical; paying
-Opus 5 rates and Opus 5 thinking latency for it is waste on the critical path.
-**Rules out:** a single shared `llm` singleton — any future config change must
-consider both instances.
+**Rules out:**
+- Treating the deleted entries as history.
+- Changing `config.llm` without considering both callers: `query_rewriter.py`
+  and `generate_response.py` use the same instance.
 
 ## 2026-09-07 — Template views are GET-only; every mutation goes through `/chats/api/`
 
@@ -41,3 +44,22 @@ hand-rolled `JsonResponse` endpoints alongside DRF — a new mutation or JSON
 read belongs in `chats/api/` with a serializer, and DRF's global
 `LimitOffsetPagination` is the pagination mechanism, not manual `limit`/`offset`
 parsing.
+
+## 2026-11-02 — Answer streaming is SSE framing over a sync POST, consumed with fetch()
+
+`/chats/api/<pk>/messages/stream/` returns a `StreamingHttpResponse` of
+`event:`/`data:` frames from a sync generator. The chat page reads it with
+`fetch()` plus `body.getReader()`. Only the complete answer is saved, and the
+client swaps in server-rendered `content_html` on `done`.
+**Why:** this is the smallest change that streams on the existing WSGI stack,
+and it adds no new dependencies.
+**Rules out:**
+- WebSockets/Channels, which would need ASGI, Redis and a consumer layer for a
+  one-way stream.
+- `EventSource`, which is GET-only, so the question would have to go in the
+  query string.
+- A client-side Markdown renderer, which would be a second renderer that drifts
+  from `render_answer`.
+- Saving partial answers on disconnect.
+- Moving to ASGI without first rewriting the generator as async. Django buffers
+  sync iterators under ASGI, which would silently disable streaming.

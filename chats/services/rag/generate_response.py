@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+
 import tiktoken
 
 from langchain_core.output_parsers import StrOutputParser
@@ -18,7 +20,34 @@ def generate_response(
     """
     Generates a response to the original query based on the retrieved chunks and chat history.
     """
+    return generate_answer_chain.invoke(
+        _build_chain_input(original_query, chat_history, chunks)
+    )
 
+
+def generate_response_stream(
+    original_query: str,
+    chat_history: list[ChatMessage],
+    chunks: list[DocumentChunk],
+) -> Iterator[str]:
+    """
+    Same as generate_response, but yields the answer as it is generated, one text fragment at a time.
+    """
+    # the chain ends in StrOutputParser, so .stream() yields str fragments
+    yield from generate_answer_chain.stream(
+        _build_chain_input(original_query, chat_history, chunks)
+    )
+
+
+def _build_chain_input(
+    original_query: str,
+    chat_history: list[ChatMessage],
+    chunks: list[DocumentChunk],
+) -> dict:
+    """
+    Builds the input dict for generate_answer_chain: the PDF context, the
+    history trimmed to the token budget, and the question.
+    """
     pdf_context = "\n\n".join(
         [f"[Page {chunk.page_number}]\n{chunk.content}" for chunk in chunks]
     )
@@ -32,14 +61,11 @@ def generate_response(
 
     langchain_messages = _to_langchain_messages(trimmed_history)
 
-    answer = generate_answer_chain.invoke(
-        {
-            "context": pdf_context,
-            "chat_history": langchain_messages,  # MessagesPlaceholder expects a list of LangChain messages
-            "question": original_query,
-        }
-    )
-    return answer
+    return {
+        "context": pdf_context,
+        "chat_history": langchain_messages,  # MessagesPlaceholder expects a list of LangChain messages
+        "question": original_query,
+    }
 
 
 def _get_system_prompt_tokens(pdf_context: str) -> int:

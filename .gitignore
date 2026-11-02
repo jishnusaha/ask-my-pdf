@@ -13,3 +13,10 @@ wheels/
 # Virtual environment directories
 .env
 .env.*
+
+# macOS Finder metadata
+.DS_Store
+
+# Claude Code machine-local files (personal permissions, worker run log)
+.claude/settings.local.json
+.claude/worker-ledger.jsonl
