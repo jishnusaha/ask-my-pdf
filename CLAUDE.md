@@ -32,9 +32,9 @@ Every management command imports the RAG service layer, which loads the ~80MB
 cross-encoder into memory before the command runs. Expect a few seconds of
 startup on even `manage.py check`.
 
-`uv run ruff check .` currently reports 2 pre-existing `F401` errors, both in
-untouched Django scaffolding (`chats/admin.py`, `chats/tests.py`). They are not
-regressions from recent work.
+`uv run ruff check .` currently reports 1 pre-existing `F401` error: the unused
+`TestCase` import in the untouched Django stub `chats/tests.py`. It is not a
+regression from recent work.
 
 ## Architecture
 
@@ -43,11 +43,12 @@ Django monolith with a RAG pipeline implemented as a service layer. Template vie
 **Data flow — PDF ingestion (API):**
 `ChatListCreateAPIView.create` → `serializer.save()` → **`ChatCreateSerializer.create`** does the real work: `parser.extract_text_by_page` → `embedder.chunk_pages` (also computes the SHA-256 `content_hash`) → `embedder.embed_chunks` → `ingestor.ingest_chunks` (atomic DB write). The view itself only re-serializes the result with `ChatSerializer` and returns 201.
 
-**Data flow — question answering (API):**
-`MessageListCreateAPIView.create` → `pipeline.ask()` → query rewrite → vector retrieval (top `k=5`) → cross-encoder rerank → token-aware prompt build → LLM call → `ChatMessage.bulk_create`. `ask()` returns nothing; the view captures the new rows by recording `last_id` before the call and re-querying `id__gt=last_id` afterwards.
+**Data flow — question answering (API, streaming is the only path):**
+`MessageStreamAPIView.post` → `StreamingHttpResponse(_event_stream(...))` → `pipeline.ask_stream()` → query rewrite (`.invoke` — must finish before retrieval) → vector retrieval (top `k=5`) → cross-encoder rerank → `generate_response.generate_response_stream()` (token-aware prompt build, then `generate_answer_chain.stream(...)`) → each text fragment is yielded up as an SSE `token` event → once the answer is complete, `ChatMessage.bulk_create` saves the user + assistant rows → `_event_stream` re-queries them (`last_id` recorded before the call, then `id__gt=last_id`) and sends the `done` event. There is no non-streaming ask endpoint; `POST /chats/api/<pk>/messages/` returns 405.
 
-**Data flow — streaming question answering (API):**
-`MessageStreamAPIView.post` validates (404 unknown chat, 400 bad `question` — both plain JSON, before any stream starts) and returns a `StreamingHttpResponse` (`text/event-stream`) wrapping the `_event_stream` generator → `pipeline.ask_stream()` → the same rewrite/retrieve/rerank (`_retrieve_context`, shared with `ask()`) → `generate_response_stream()` (`generate_answer_chain.stream(...)`, same chain and same `_build_chain_input` as the non-stream path) → yields text fragments, then `_save_exchange` once the answer is complete. Rewrite, retrieval and rerank run *inside* the generator, i.e. after the view has already returned a 200 response object, so a failure anywhere in the pipeline surfaces as an `error` event, not a 5xx. **Headers are not sent immediately:** WSGI servers (PEP 3333; `wsgiref.handlers.BaseHandler.write` sends headers on the first non-empty write) transmit nothing until the generator yields its first value, and the first yield is the first LLM token — measured ~3.4–5 s after the request, with status line and first token arriving together. If the client disconnects mid-answer, the server's next socket write fails, it calls `close()` on the response, which closes the generator (`GeneratorExit` at the `yield`), and **nothing is saved** — neither the question nor a partial answer. A disconnect during rewrite/retrieve/rerank is not noticed until the first token write, because nothing is written before then.
+- **Where errors land.** The chat lookup (404) and `MessageCreateSerializer` validation (400) run in `post()` before the response is built, so they are normal DRF JSON errors. Everything after that runs inside the generator, after the view has already returned a 200 response object, so any failure in rewrite/retrieve/rerank/generation becomes an SSE `error` event, not a 5xx.
+- **Headers are not sent immediately.** WSGI servers send nothing until the generator yields its first non-empty value (PEP 3333; `wsgiref.handlers.BaseHandler.write` sends headers on the first write). The first yield is the first LLM token, so the status line, headers and first token arrive together — measured 3.4–5.0 s after the request.
+- **Client disconnects.** The server only notices on its next socket write: the write fails, it calls `close()` on the response, which closes the generator (`GeneratorExit` at the `yield`), so `bulk_create` never runs and **nothing is saved** — neither the question nor a partial answer. A disconnect during rewrite/retrieve/rerank is not noticed until the first token write.
 
 **Data flow — PDF re-upload (API):**
 `ChatReuploadAPIView.post` → `parser.extract_text_by_page` → `embedder.chunk_pages` → `ingestor.reingest_chunks`. Hash comparison and selective embedding happen *inside* `reingest_chunks`, not as separate steps in the view: it builds a `content_hash → embedding` map from the existing rows (deliberately outside the transaction, so no DB lock is held across the OpenAI call), reuses embeddings for unchanged text, embeds only new/changed chunks, then atomically deletes and re-creates all chunks. Chat history is untouched.
@@ -66,15 +67,15 @@ Each file has exactly one responsibility:
 | `ingestor.py` | `ingest_chunks` — atomic new `Chat` + `DocumentChunk` save; `reingest_chunks` — hash-based embedding reuse then atomic chunk replacement on an existing `Chat` |
 | `query_rewriter.py` | Rewrites follow-up questions into standalone retrieval queries, using the last 6 history messages; returns the original query unchanged when there is no history |
 | `reranker.py` | Cross-encoder scoring (`cross-encoder/ms-marco-MiniLM-L-6-v2`), filters below `RERANK_THRESHOLD=3`, falls back to the top chunk if everything is filtered |
-| `generate_response.py` | Token budget trimming (drops oldest history first), LangChain chain invocation |
-| `pipeline.py` | Orchestrates the full `ask()` flow |
+| `generate_response.py` | `generate_response_stream`: builds the context, trims history to the token budget (drops oldest first), then streams the chain (`chain.stream`), yielding text fragments |
+| `pipeline.py` | `ask_stream()` (generator): rewrite → retrieve → rerank → stream the answer → `bulk_create` of user + assistant rows once complete |
 
 ### Key design decisions
 
 - The `CrossEncoder` model and `OpenAIEmbeddings` / `splitter` instances are initialized once at module import time — they are singletons per Django worker process. The reranker model (~80MB) downloads from HuggingFace on first run and caches at `~/.cache/huggingface/hub/`.
 - **One LLM instance serves both calls.** `query_rewriter.py` and `generate_response.py` both import the same `llm` from `config.py`; there is no separate cheaper model for rewriting. Any change to `config.llm` affects both.
 - `TOKEN_BUFFER` does double duty: it is both the reserve subtracted from the history budget *and* the `max_tokens` output cap on the `llm` instance. Changing it changes both behaviors.
-- `ChatMessage.content` stores raw markdown + `[Page N]` citation markers. It is rendered to HTML in **two** places: the `render_answer` template filter (`chats/templatetags/chat_extras.py`) for server-rendered history, and `ChatMessageSerializer.content_html` for messages the JS appends live. Both call `parser.render_answer`; `content_html` is `null` for user messages.
+- `ChatMessage.content` stores raw markdown + `[Page N]` citation markers. It is rendered to HTML in **two** places: the `render_answer` template filter (`chats/templatetags/chat_extras.py`) for server-rendered history, and `ChatMessageSerializer.content_html` for API responses — the SSE `done` event (which `chat.html` swaps in when an answer finishes streaming) and `GET /messages/`. Both call `parser.render_answer`; `content_html` is `null` for user messages.
 - `DocumentChunk.embedding` is a 1536-dim `VectorField` (pgvector). Vector similarity search uses `CosineDistance` from `pgvector.django`.
 - Token budget: `TOKEN_LIMIT (128000) - TOKEN_BUFFER (2000) - system_prompt_tokens - query_tokens = history budget`. If budget is exceeded, oldest messages are dropped.
 - **The uploaded PDF is never persisted.** It is parsed in memory and discarded; only the extracted chunks live in the DB. `MEDIA_URL` / `MEDIA_ROOT` are configured in settings but unused. Re-upload therefore requires the user to supply the file again, and there is nothing to serve back for download.
@@ -89,7 +90,7 @@ Migrations: `0001_initial` (extension + all three models), `0002_add_content_has
 
 ### URL structure
 
-There is **no route at `/`** — it returns 404. The entry point is `/chats/`. `/admin/` is mounted but no `django.contrib.admin` models are registered.
+There is **no route at `/`** — it returns 404. The entry point is `/chats/`. `/admin/` is mounted and `chats/admin.py` registers `Chat`, `ChatMessage` and `DocumentChunk` with the default `ModelAdmin` (no customization). Logging in needs a staff user (`python manage.py createsuperuser`); the admin is the only part of the app behind authentication.
 
 **Template views** (GET only — render pages):
 
@@ -104,24 +105,23 @@ There is **no route at `/`** — it returns 404. The entry point is `/chats/`. `
 |---|---|---|---|
 | `GET` | `/chats/api/` | `ChatListCreateAPIView` | List all chats |
 | `POST` | `/chats/api/` | `ChatListCreateAPIView` | Upload PDF + create chat (`pdf` file, optional `title`) |
-| `GET` | `/chats/api/<pk>/messages/` | `MessageListCreateAPIView` | List messages for a chat |
-| `POST` | `/chats/api/<pk>/messages/` | `MessageListCreateAPIView` | Send a question (`question`); returns a bare `[user, assistant]` list |
-| `POST` | `/chats/api/<pk>/messages/stream/` | `MessageStreamAPIView` | Same as above, but streams the answer as Server-Sent Events (see below). Used by the chat page. |
+| `GET` | `/chats/api/<pk>/messages/` | `MessageListAPIView` | List messages for a chat (`POST` here returns 405) |
+| `POST` | `/chats/api/<pk>/messages/stream/` | `MessageStreamAPIView` | Send a question (`question`); streams the answer as Server-Sent Events (see below). The only way to ask; used by the chat page. |
 | `POST` | `/chats/api/<pk>/reupload/` | `ChatReuploadAPIView` | Replace PDF for an existing chat (`pdf` file) |
 | `GET` | `/chats/api/<pk>/chunks/` | `ChunkListAPIView` | List stored chunks |
 
 ### API behavior worth knowing
 
-- **All three GET list endpoints are paginated**, not just chunks. `DEFAULT_PAGINATION_CLASS = LimitOffsetPagination` with `PAGE_SIZE = 20` is global, so `/chats/api/`, `/chats/api/<pk>/messages/` and `/chats/api/<pk>/chunks/` all return `{"count", "next", "previous", "results"}` and all accept `limit`/`offset`. The `POST` to `/messages/` is the exception — it goes through `create()` and returns a plain list.
+- **All three GET list endpoints are paginated**, not just chunks. `DEFAULT_PAGINATION_CLASS = LimitOffsetPagination` with `PAGE_SIZE = 20` is global, so `/chats/api/`, `/chats/api/<pk>/messages/` and `/chats/api/<pk>/chunks/` all return `{"count", "next", "previous", "results"}` and all accept `limit`/`offset`. No client in the repo calls these GETs — the sidebar and chat history are server-rendered by the template views — but they are kept as the JSON read API.
 - **The API is unauthenticated and effectively CSRF-exempt.** `DEFAULT_AUTHENTICATION_CLASSES` and `DEFAULT_PERMISSION_CLASSES` are both `[]`, so DRF never runs `SessionAuthentication.enforce_csrf`. POSTs without a CSRF token reach the view and are processed. This is why the templates' `fetch()` calls send no token. Anyone who can reach the server can read every chat and spend OpenAI credit; adding auth means adding CSRF handling to the templates' `fetch()` calls at the same time.
 - Chats have no owner field and no scoping — the sidebar lists every chat in the database for every visitor.
 - **Streaming protocol (`/messages/stream/`).** Body `{"question": "..."}`. Response is `text/event-stream` with `Cache-Control: no-cache` and `X-Accel-Buffering: no`; every frame is `event: <name>\ndata: <single-line JSON>\n\n`:
   - `token` → `{"delta": "<text fragment>"}`, zero or more.
-  - `done` → `[user_msg, assistant_msg]`, the same `ChatMessageSerializer` shape as the non-stream POST (assistant `content_html` rendered server-side).
+  - `done` → `[user_msg, assistant_msg]`, serialized with `ChatMessageSerializer` (assistant `content_html` rendered server-side).
   - `error` → `{"detail": "The answer could not be generated. Please try again."}` — generic on purpose; the traceback goes to the server log only. Nothing is saved.
   Exactly one of `done`/`error` ends each stream. The view overrides `perform_content_negotiation(force=True)` because `Accept: text/event-stream` matches no DRF renderer and would otherwise 406 before the view runs. `chat.html` consumes this with `fetch()` + `response.body.getReader()` (not `EventSource`, which cannot POST); it shows raw text via `textContent` while streaming and swaps in `content_html` on `done`, so `render_answer` stays the single renderer.
-- **Every ask holds a server worker for the whole answer (~5–20 s), streaming or not** — the time is spent waiting on OpenAI either way. Fine under threaded `runserver`. For production (no app server is installed yet — `gunicorn` is not in `pyproject.toml`), use gunicorn's threaded worker class, e.g. `gunicorn config.wsgi --worker-class gthread --workers 2 --threads 8`, so one slow question doesn't block others. The streaming view is sync — under ASGI (uvicorn/daphne), Django consumes a sync generator fully via `sync_to_async(list)` before sending (`django/http/response.py`), which silently turns streaming back into one delayed response. Convert it to `async def` + LangChain `astream` before any move to ASGI.
-- The `last_id` / `id__gt` capture is racy if two asks on the same chat overlap (both views share it). Streaming makes requests longer, so overlap is likelier.
+- **Every ask holds a server worker for the whole answer** (about 6–7 s end to end in measured runs, longer for long answers) — the time is spent waiting on OpenAI. Fine under threaded `runserver`. For production (no app server is installed yet — `gunicorn` is not in `pyproject.toml`), use gunicorn's threaded worker class, e.g. `gunicorn config.wsgi --worker-class gthread --workers 2 --threads 8`, so one slow question doesn't block others. The streaming view is sync — under ASGI (uvicorn/daphne), Django consumes a sync generator fully via `sync_to_async(list)` before sending (`django/http/response.py`), which silently turns streaming back into one delayed response. Convert it to `async def` + LangChain `astream` before any move to ASGI.
+- The `last_id` / `id__gt` capture in `_event_stream` is racy: if two asks on the same chat overlap, one `done` event can include the other request's rows. Not fixed.
 
 ### Tests
 
@@ -137,6 +137,4 @@ Optional: `DEBUG` (default `False`), `ALLOWED_HOSTS` (default `127.0.0.1`), `CSR
 
 ---
 
-*Verified against `main` @ `ad83085`. Claims about routes, pagination shape, CSRF behavior, and the `runserver` default port were checked by executing them, not read from prior docs.*
-
-*Streaming sections (data flow, `/messages/stream/` row, protocol, worker-holding and ASGI notes) verified against `main` @ `018a895` plus the 2026-11-02 streaming change, by live SSE requests to the endpoint; the ASGI buffering claim was read from `django/http/response.py` (`sync_to_async(list)`), not exercised. The `chat.html` consumer was not exercised in a browser.*
+*Verified 2026-11-02 against `main` @ `af78051` plus the streaming-only change in the working tree. Routes, pagination shape, CSRF behavior, the `runserver` default port, the 405 on `POST /messages/`, and the SSE protocol (events, headers, 400/404 before the stream, no save on disconnect, header timing) were checked by executing them, not read from prior docs. Not exercised: the ASGI buffering claim (read from `django/http/response.py`, `sync_to_async(list)`) and the `chat.html` consumer in a real browser.*

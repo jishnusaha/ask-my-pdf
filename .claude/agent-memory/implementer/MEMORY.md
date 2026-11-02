@@ -1,0 +1,1 @@
+- [Live-testing traps](live-testing-traps.md) — unstable chat ids in dev DB, .env reads denied, ruff exit code, server start/kill recipe

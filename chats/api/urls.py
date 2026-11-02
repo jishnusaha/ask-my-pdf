@@ -2,7 +2,7 @@ from django.urls import path
 
 from chats.api.views import (
     ChatListCreateAPIView,
-    MessageListCreateAPIView,
+    MessageListAPIView,
     MessageStreamAPIView,
     ChatReuploadAPIView,
     ChunkListAPIView,
@@ -10,11 +10,7 @@ from chats.api.views import (
 
 urlpatterns = [
     path("", ChatListCreateAPIView.as_view(), name="api_chat_list_create"),
-    path(
-        "<int:pk>/messages/",
-        MessageListCreateAPIView.as_view(),
-        name="api_message_list_create",
-    ),
+    path("<int:pk>/messages/", MessageListAPIView.as_view(), name="api_message_list"),
     path(
         "<int:pk>/messages/stream/",
         MessageStreamAPIView.as_view(),

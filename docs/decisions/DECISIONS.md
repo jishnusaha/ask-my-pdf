@@ -63,3 +63,32 @@ and it adds no new dependencies.
 - Saving partial answers on disconnect.
 - Moving to ASGI without first rewriting the generator as async. Django buffers
   sync iterators under ASGI, which would silently disable streaming.
+
+## 2026-11-02 — Streaming is the only way to ask; the blocking path is removed
+
+The blocking path is gone:
+- `POST /chats/api/<pk>/messages/`
+- `pipeline.ask()`
+- the `invoke`-based `generate_response()`
+
+`ask_stream()` and `generate_response_stream()` are each one straight-line
+function again. `/chats/api/<pk>/messages/` is now `MessageListAPIView`
+(GET only; POST returns 405).
+
+**Why:** nothing in the repo called the blocking endpoint after `chat.html`
+moved to `/messages/stream/`. Keeping both paths required helpers
+(`_retrieve_context`, `_save_exchange`, `_build_chain_input`) whose only purpose
+was to let the two paths share code.
+
+**Kept deliberately:** the three GET endpoints (`/chats/api/`, `.../messages/`,
+`.../chunks/`). No page calls them, because the sidebar and history are
+server-rendered. They are kept as the JSON read API.
+
+`query_rewriter.py` keeps `.invoke`: retrieval needs the complete rewritten
+query.
+
+**Rules out:**
+- Re-adding a parallel non-streaming ask endpoint. Callers that need one JSON
+  result should read the `done` event, or ask via the stream and then call
+  `GET /messages/`.
+- Treating the unused GETs as dead code.

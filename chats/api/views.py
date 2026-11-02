@@ -11,7 +11,7 @@ from chats.models import Chat
 from chats.services.rag.parser import extract_text_by_page
 from chats.services.rag.embedder import chunk_pages
 from chats.services.rag.ingestor import reingest_chunks
-from chats.services.rag.pipeline import ask, ask_stream
+from chats.services.rag.pipeline import ask_stream
 
 from .serializers import (
     ChatSerializer,
@@ -42,31 +42,12 @@ class ChatListCreateAPIView(generics.ListCreateAPIView):
         return Response(ChatSerializer(chat).data, status=status.HTTP_201_CREATED)
 
 
-class MessageListCreateAPIView(generics.ListCreateAPIView):
+class MessageListAPIView(generics.ListAPIView):
     serializer_class = ChatMessageSerializer
 
-    def get_chat(self):
-        return get_object_or_404(Chat, pk=self.kwargs["pk"])
-
     def get_queryset(self):
-        return self.get_chat().messages.all()
-
-    def create(self, request, *args, **kwargs):
-        chat = self.get_chat()
-        serializer = MessageCreateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        question = serializer.validated_data["question"]
-
-        last_id = (
-            chat.messages.order_by("-id").values_list("id", flat=True).first() or 0
-        )
-        ask(chat.pk, question, list(chat.messages.all()))
-        new_messages = chat.messages.filter(id__gt=last_id).order_by("id")
-
-        return Response(
-            ChatMessageSerializer(new_messages, many=True).data,
-            status=status.HTTP_201_CREATED,
-        )
+        chat = get_object_or_404(Chat, pk=self.kwargs["pk"])
+        return chat.messages.all()
 
 
 class MessageStreamAPIView(APIView):

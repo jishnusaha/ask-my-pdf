@@ -14,8 +14,8 @@ AskMyPDF uses a RAG (Retrieval-Augmented Generation) pipeline to extract, chunk,
 ## Features
 
 - Upload a PDF and process it in one step
-- Chat with your PDF using natural language — messages stream into the UI without page reloads
-- Interactive UI throughout — loading indicators on upload, animated "thinking" indicator while the AI responds, inline status for re-upload
+- Chat with your PDF using natural language — answers stream in token-by-token as they are generated (Server-Sent Events), no page reloads
+- Interactive UI throughout — loading indicators on upload, animated "thinking" indicator until the first words of the answer arrive, inline status for re-upload
 - Resume previous chats — full conversation history preserved
 - Re-upload an updated PDF to an existing chat — unchanged chunks are detected by content hash and reused, avoiding redundant embedding API calls
 - Answers grounded strictly in PDF content, no hallucination
@@ -24,7 +24,7 @@ AskMyPDF uses a RAG (Retrieval-Augmented Generation) pipeline to extract, chunk,
 - Query rewriting for accurate retrieval on follow-up questions
 - Cross-encoder reranking to filter and reorder chunks by true relevance
 - Token budget management to handle long conversations safely
-- REST API layer — all mutations exposed as JSON endpoints under `/chats/api/`
+- REST API layer — all mutations exposed under `/chats/api/` (JSON, plus a Server-Sent Events stream for answers)
 
 ---
 
@@ -55,7 +55,8 @@ User Question
   → generate answer with inline [Page N] citations   (gpt-4.1-mini)
   → stream answer tokens to the browser     (Server-Sent Events; /messages/stream/)
   → save to chat history                    (once the answer is complete)
-  → render markdown + citation badges for display     (parser + template filter)
+  → render markdown + citation badges for display     (parser.render_answer — sent in the final SSE event;
+                                                        template filter for saved history)
 ```
 
 ---
@@ -81,7 +82,8 @@ ask-my-pdf/
 ├── config/                   # project settings
 │   ├── settings.py
 │   ├── urls.py
-│   └── wsgi.py
+│   ├── wsgi.py               # used by runserver / gunicorn (streaming relies on WSGI)
+│   └── asgi.py               # Django default; not used (see Streaming Answers)
 ├── chats/                    # main app
 │   ├── models.py             # Chat, DocumentChunk, ChatMessage
 │   ├── views.py              # template views (GET only — render pages)
@@ -89,7 +91,7 @@ ask-my-pdf/
 │   ├── api/                  # DRF API layer
 │   │   ├── __init__.py
 │   │   ├── serializers.py    # ChatSerializer, ChatMessageSerializer, ChatCreateSerializer, etc.
-│   │   ├── views.py          # ChatListCreateAPIView, MessageListCreateAPIView, ChatReuploadAPIView, ChunkListAPIView
+│   │   ├── views.py          # ChatListCreateAPIView, MessageListAPIView, MessageStreamAPIView, ChatReuploadAPIView, ChunkListAPIView
 │   │   └── urls.py           # all routes under /chats/api/
 │   ├── services/
 │   │   └── rag/
@@ -98,8 +100,8 @@ ask-my-pdf/
 │   │       ├── prompts.py          # query rewriter + answer generation prompts
 │   │       ├── query_rewriter.py   # query rewriting for retrieval
 │   │       ├── reranker.py         # cross-encoder reranking + filtering
-│   │       ├── generate_response.py # prompt building + LLM call
-│   │       ├── pipeline.py         # orchestrates the full ask() flow
+│   │       ├── generate_response.py # prompt building + streaming LLM call
+│   │       ├── pipeline.py         # orchestrates the ask_stream() flow
 │   │       ├── parser.py           # PDF text extraction + answer/citation rendering
 │   │       ├── embedder.py         # chunking + embedding + retrieval
 │   │       └── ingestor.py         # atomic DB save
@@ -110,6 +112,10 @@ ask-my-pdf/
 │           ├── base.html
 │           ├── upload.html
 │           └── chat.html
+├── docs/
+│   ├── changelogs/           # one file per working session
+│   └── decisions/
+│       └── DECISIONS.md      # architectural decisions and rejected alternatives
 ├── docker-compose.yml
 ├── .env
 └── manage.py
@@ -189,12 +195,14 @@ python manage.py migrate
 ### 6. Start the server
 
 ```bash
-python manage.py runserver
+python manage.py runserver 9001
 ```
+
+Pass the port explicitly: plain `runserver` binds port 8000, which does not match the default `CSRF_TRUSTED_ORIGINS` (`http://127.0.0.1:9001`).
 
 > **Note:** On first run, the reranker model (~80MB) will be automatically downloaded from HuggingFace and cached locally at `~/.cache/huggingface/hub/`. Subsequent starts load from cache instantly.
 
-Visit `http://localhost:9001/chats/`
+Visit `http://127.0.0.1:9001/chats/` (`ALLOWED_HOSTS` defaults to `127.0.0.1` only, so `localhost` is rejected unless you add it).
 
 ---
 
@@ -233,10 +241,10 @@ The pipeline is organized as a clean package under `chats/services/rag/`, each f
 | `query_rewriter.py` | Rewrites follow-up questions into standalone retrieval queries |
 | `reranker.py` | Cross-encoder scoring, reordering, and filtering of retrieved chunks |
 | `embedder.py` | Chunks (with SHA-256 hashing), embeds (skips pre-populated embeddings), and retrieves document chunks via pgvector |
-| `generate_response.py` | Builds prompt with token-aware history trimming, calls LLM |
+| `generate_response.py` | Builds prompt with token-aware history trimming, streams the LLM answer (`generate_response_stream`) |
 | `ingestor.py` | `ingest_chunks` atomically creates a new Chat + chunks; `reingest_chunks` replaces chunks on an existing Chat with embedding reuse |
 | `parser.py` | Extracts text from PDF page by page (pypdf); renders answers (markdown + `[Page N]` citations) into safe HTML for display |
-| `pipeline.py` | Orchestrates the full ask() flow |
+| `pipeline.py` | Orchestrates `ask_stream()`: rewrite → retrieve → rerank → stream the answer piece by piece → save once complete |
 
 ### Query Rewriting
 
@@ -248,11 +256,34 @@ After retrieval, a cross-encoder model (`cross-encoder/ms-marco-MiniLM-L-6-v2`) 
 
 ### Token Budget Guard
 
-Before calling the LLM, the pipeline calculates the total token consumption across the system prompt, retrieved context, chat history, and current question. If the total exceeds the model's context window, the oldest chat history messages are dropped first until the prompt fits. Retrieved chunks are preserved as long as possible since they are the primary source of truth.
+Before calling the LLM, the pipeline counts the tokens of the system prompt (which contains the retrieved context) and the current question, and gives chat history whatever is left of a fixed budget: `TOKEN_LIMIT` (128,000) minus `TOKEN_BUFFER` (2,000, reserved for the answer — it is also the answer's `max_tokens`). If the history does not fit, the oldest messages are dropped first. Retrieved chunks are never dropped, since they are the primary source of truth.
+
+### Streaming Answers
+
+The chat page calls `POST /chats/api/<pk>/messages/stream/`, which returns a `text/event-stream` response instead of one JSON body. Rewrite, retrieval and reranking run first; then each fragment the LLM produces is sent immediately as a Server-Sent Event:
+
+```
+event: token
+data: {"delta": "Revenue grew"}
+
+event: done
+data: [{...user message...}, {...assistant message, with content_html...}]
+```
+
+- **`token`** events carry raw text; the page shows it as plain text while it arrives.
+- **`done`** carries the two saved messages (same shape as `GET /messages/` results); the page swaps the raw text for the server-rendered `content_html`, so citation badges look identical to saved history.
+- **`error`** replaces `done` if generation fails, with a generic message.
+- Messages are saved only once the answer is complete. If the browser disconnects mid-answer, nothing is saved.
+- Invalid questions (400) and unknown chats (404) are rejected as normal JSON errors before the stream starts.
+- The browser uses `fetch()` + `response.body.getReader()` rather than `EventSource`, because `EventSource` cannot send a POST body.
+
+Streaming is the only way to ask a question. `/chats/api/<pk>/messages/` only lists messages (`GET`); a `POST` there returns 405.
+
+**Deployment note:** the streaming view is synchronous and relies on a WSGI server. Use a threaded server such as `gunicorn config.wsgi --worker-class gthread --threads 8`, since each question holds a worker for the duration of the answer. Under an ASGI server (uvicorn/daphne), Django would buffer the whole answer before sending it, silently disabling streaming.
 
 ### Source Citations
 
-Each retrieved chunk is injected into the prompt with a `[Page N]` marker, and the answer-generation prompt instructs the model to cite the source page inline (e.g. `Revenue grew 12% [Page 4].`) after any statement drawn from the context — only for pages that actually appear in the retrieved chunks, and never on a "not found" answer. The raw answer (markdown + `[Page N]`) is saved as-is in `ChatMessage.content`, then `parser.render_answer()` — exposed to templates via the `render_answer` filter — converts it to safe, escaped HTML, rendering the markdown and turning each `[Page N]` into a styled citation badge in the chat UI.
+Each retrieved chunk is injected into the prompt with a `[Page N]` marker, and the answer-generation prompt instructs the model to cite the source page inline (e.g. `Revenue grew 12% [Page 4].`) after any statement drawn from the context — only for pages that actually appear in the retrieved chunks, and never on a "not found" answer. The raw answer (markdown + `[Page N]`) is saved as-is in `ChatMessage.content`, then `parser.render_answer()` — exposed to templates via the `render_answer` filter — converts it to safe, escaped HTML, rendering the markdown and turning each `[Page N]` into a styled citation badge in the chat UI. The same function produces `content_html` in API responses, which the chat page swaps in when a streamed answer finishes.
 
 ---
 
@@ -265,7 +296,7 @@ Each retrieved chunk is injected into the prompt with a `[Page N]` marker, and t
 | `POSTGRES_USER` | PostgreSQL username |
 | `POSTGRES_PASSWORD` | PostgreSQL password |
 | `POSTGRES_HOST` | PostgreSQL host (e.g. `localhost`) |
-| `POSTGRES_PORT` | PostgreSQL port (e.g. `5432`) |
+| `POSTGRES_PORT` | Host port for PostgreSQL (e.g. `9002`; Docker maps it to the container's `5432`) |
 | `ALLOWED_HOSTS` | Comma-separated list of allowed hosts (e.g. `localhost,127.0.0.1`) |
 | `CSRF_TRUSTED_ORIGINS` | Trusted origins for CSRF (e.g. `http://localhost:9001`) |
 
@@ -302,8 +333,9 @@ E1 --> F1[Rerank Chunks]
 F1 --> |Token Budget| G1[Trim Chat History]
 G1 --> H1[Build Prompt]
 H1 --> |LLM Call|I1[Generate Answer]
-I1 --> J1[Save Messages]
-J1 --> K1[Return Answer]
+I1 --> |Stream tokens - SSE| S1[Show Answer As It Is Generated]
+S1 --> J1[Save Messages]
+J1 --> K1[Send Saved Messages - SSE done event]
 
 ```
 
@@ -319,8 +351,7 @@ All mutation operations are exposed as a REST API under `/chats/api/`. The templ
 | `GET` | `/chats/api/` | List all chats |
 | `POST` | `/chats/api/` | Upload a PDF and create a new chat |
 | `GET` | `/chats/api/<pk>/messages/` | List all messages for a chat |
-| `POST` | `/chats/api/<pk>/messages/` | Send a question — returns `[user, assistant]` messages |
-| `POST` | `/chats/api/<pk>/messages/stream/` | Send a question — streams the answer as Server-Sent Events (`token` …, then `done` with `[user, assistant]`, or `error`). Used by the chat page. |
+| `POST` | `/chats/api/<pk>/messages/stream/` | Send a question — streams the answer as Server-Sent Events (`token` …, then `done` with `[user, assistant]`, or `error`). The only way to ask; used by the chat page. |
 | `POST` | `/chats/api/<pk>/reupload/` | Replace the PDF for an existing chat |
 | `GET` | `/chats/api/<pk>/chunks/` | List stored chunks (paginated, `limit`/`offset`) |
 
