@@ -30,8 +30,14 @@ class ChatMessage(models.Model):
         USER = "user", "User"
         ASSISTANT = "assistant", "Assistant"
 
+    class Mode(models.TextChoices):
+        TEXT = "text", "Text"
+        VOICE = "voice", "Voice"
+
     chat = models.ForeignKey(Chat, on_delete=models.CASCADE, related_name="messages")
     role = models.CharField(max_length=10, choices=Role.choices)
+    # whether voice mode was on for the turn, not how the question was entered
+    mode = models.CharField(max_length=5, choices=Mode.choices, default=Mode.TEXT)
     content = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
 

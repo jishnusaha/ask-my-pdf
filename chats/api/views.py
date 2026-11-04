@@ -61,20 +61,21 @@ class MessageStreamAPIView(APIView):
         serializer = MessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         question = serializer.validated_data["question"]
+        mode = serializer.validated_data["mode"]
 
         response = StreamingHttpResponse(
-            self._event_stream(chat, question), content_type="text/event-stream"
+            self._event_stream(chat, question, mode), content_type="text/event-stream"
         )
         response["Cache-Control"] = "no-cache"
         response["X-Accel-Buffering"] = "no"  # stops nginx from buffering the stream
         return response
 
-    def _event_stream(self, chat, question):
+    def _event_stream(self, chat, question, mode):
         last_id = (
             chat.messages.order_by("-id").values_list("id", flat=True).first() or 0
         )
         try:
-            for delta in ask_stream(chat.pk, question, list(chat.messages.all())):
+            for delta in ask_stream(chat.pk, question, list(chat.messages.all()), mode):
                 if delta:
                     yield _sse("token", {"delta": delta})
         except Exception:

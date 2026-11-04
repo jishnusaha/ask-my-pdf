@@ -9,7 +9,7 @@ from .generate_response import generate_response_stream
 
 
 def ask_stream(
-    chat_id: int, original_query: str, chat_history: list[ChatMessage]
+    chat_id: int, original_query: str, chat_history: list[ChatMessage], mode: str
 ) -> Iterator[str]:
     """
     Handles the process of asking a question in a chat session.
@@ -34,15 +34,20 @@ def ask_stream(
         parts.append(delta)
         yield delta
 
-    # save the original question and the generated answer as ChatMessages
+    # save the original question and the generated answer as ChatMessages;
+    # both rows of the turn carry the same mode
     ChatMessage.objects.bulk_create(
         [
             ChatMessage(
-                chat_id=chat_id, role=ChatMessage.Role.USER, content=original_query
+                chat_id=chat_id,
+                role=ChatMessage.Role.USER,
+                mode=mode,
+                content=original_query,
             ),
             ChatMessage(
                 chat_id=chat_id,
                 role=ChatMessage.Role.ASSISTANT,
+                mode=mode,
                 content="".join(parts),
             ),
         ]

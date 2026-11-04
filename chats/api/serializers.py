@@ -47,3 +47,6 @@ class ChatCreateSerializer(serializers.Serializer):
 
 class MessageCreateSerializer(serializers.Serializer):
     question = serializers.CharField(min_length=1, trim_whitespace=True)
+    mode = serializers.ChoiceField(
+        choices=ChatMessage.Mode.choices, default=ChatMessage.Mode.TEXT
+    )
