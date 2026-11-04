@@ -20,3 +20,10 @@ class ChunkData(BaseModel):
     text: str
     content_hash: str = ""
     embedding: Optional[List[float]] = None
+
+
+class KeyTerms(BaseModel):
+    # Structured output schema for key term extraction (key_terms.py)
+    model_config = ConfigDict(extra="forbid")
+
+    terms: List[str]

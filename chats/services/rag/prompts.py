@@ -102,3 +102,29 @@ voice_answer_generation_prompt = ChatPromptTemplate.from_messages(
         ("human", "{question}"),
     ]
 )
+
+key_terms_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """You extract key terms from a PDF. A speech-to-text model will use them as hints,
+                so it spells document-specific words correctly when a user asks about the PDF out loud.
+
+                Rules:
+                - Return the 20 to 40 most important terms: names of people, organizations and products,
+                  technical terms, acronyms, and other words a speech recognizer could misspell.
+                - Copy each term exactly as it is written in the text.
+                - Each term is at most 5 words.
+                - Do not include common everyday words.
+            """,
+        ),
+        (
+            "human",
+            """Title: {title}
+
+                Text from the first pages:
+                {text}
+            """,
+        ),
+    ]
+)

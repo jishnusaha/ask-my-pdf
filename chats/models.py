@@ -4,6 +4,8 @@ from pgvector.django import VectorField
 
 class Chat(models.Model):
     title = models.CharField(max_length=255)  # PDF filename or user-given title
+    # speech-to-text hints extracted from the PDF at upload/re-upload; [] if none
+    key_terms = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

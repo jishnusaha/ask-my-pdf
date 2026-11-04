@@ -5,10 +5,10 @@ from .embedder import embed_chunks
 from .types import ChunkData
 
 
-def ingest_chunks(title: str, chunks: list[ChunkData]) -> Chat:
+def ingest_chunks(title: str, chunks: list[ChunkData], key_terms: list[str]) -> Chat:
 
     with transaction.atomic():
-        chat = Chat.objects.create(title=title)
+        chat = Chat.objects.create(title=title, key_terms=key_terms)
 
         # instead of creating each DocumentChunk individually, we can use bulk_create for efficiency
         # in individual creation, each DocumentChunk would result in a separate database query

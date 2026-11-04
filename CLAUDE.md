@@ -41,7 +41,7 @@ regression from recent work.
 Django monolith with a RAG pipeline implemented as a service layer. Template views (GET only) render pages; all mutations are handled by a DRF API layer under `chats/api/`.
 
 **Data flow — PDF ingestion (API):**
-`ChatListCreateAPIView.create` → `serializer.save()` → **`ChatCreateSerializer.create`** does the real work: `parser.extract_text_by_page` → `embedder.chunk_pages` (also computes the SHA-256 `content_hash`) → `embedder.embed_chunks` → `ingestor.ingest_chunks` (atomic DB write). The view itself only re-serializes the result with `ChatSerializer` and returns 201.
+`ChatListCreateAPIView.create` → `serializer.save()` → **`ChatCreateSerializer.create`** does the real work: `parser.extract_text_by_page` → `embedder.chunk_pages` (also computes the SHA-256 `content_hash`) → `embedder.embed_chunks` → `key_terms.extract_key_terms(title, first 3 pages)` (one more LLM call, outside the transaction; `[]` on any failure, never fails the upload) → `ingestor.ingest_chunks(title, chunks, key_terms)` (atomic DB write). The view itself only re-serializes the result with `ChatSerializer` and returns 201.
 
 **Data flow — question answering (API, streaming is the only path):**
 `MessageStreamAPIView.post` → `StreamingHttpResponse(_event_stream(...))` → `pipeline.ask_stream()` → query rewrite (`.invoke` — must finish before retrieval) → vector retrieval (top `k=5`) → cross-encoder rerank → `generate_response.generate_response_stream()` (picks the text or voice prompt and chain from `mode`, token-aware prompt build, then `chain.stream(...)`) → each text fragment is yielded up as an SSE `token` event → once the answer is complete, `ChatMessage.bulk_create` saves the user + assistant rows, both with the request's `mode` → `_event_stream` re-queries them (`last_id` recorded before the call, then `id__gt=last_id`) and sends the `done` event. There is no non-streaming ask endpoint; `POST /chats/api/<pk>/messages/` returns 405.
@@ -51,7 +51,7 @@ Django monolith with a RAG pipeline implemented as a service layer. Template vie
 - **Client disconnects.** The server only notices on its next socket write: the write fails, it calls `close()` on the response, which closes the generator (`GeneratorExit` at the `yield`), so `bulk_create` never runs and **nothing is saved** — neither the question nor a partial answer. A disconnect during rewrite/retrieve/rerank is not noticed until the first token write.
 
 **Data flow — PDF re-upload (API):**
-`ChatReuploadAPIView.post` → `parser.extract_text_by_page` → `embedder.chunk_pages` → `ingestor.reingest_chunks`. Hash comparison and selective embedding happen *inside* `reingest_chunks`, not as separate steps in the view: it builds a `content_hash → embedding` map from the existing rows (deliberately outside the transaction, so no DB lock is held across the OpenAI call), reuses embeddings for unchanged text, embeds only new/changed chunks, then atomically deletes and re-creates all chunks. Chat history is untouched.
+`ChatReuploadAPIView.post` → `parser.extract_text_by_page` → `embedder.chunk_pages` → `ingestor.reingest_chunks`. Hash comparison and selective embedding happen *inside* `reingest_chunks`, not as separate steps in the view: it builds a `content_hash → embedding` map from the existing rows (deliberately outside the transaction, so no DB lock is held across the OpenAI call), reuses embeddings for unchanged text, embeds only new/changed chunks, then atomically deletes and re-creates all chunks. After that the view re-extracts `chat.key_terms` from the new pages and saves only that field (`[]` on failure — the old terms describe the old PDF). Chat history is untouched.
 
 ### RAG service layer (`chats/services/rag/`)
 
@@ -60,11 +60,12 @@ Each file has exactly one responsibility:
 | File | Responsibility |
 |---|---|
 | `config.py` | `MODEL_NAME` (`gpt-4.1-mini`), `TOKEN_LIMIT`, `TOKEN_BUFFER`, `RERANK_THRESHOLD`, the single shared `llm` instance (`ChatOpenAI`, `temperature=0.2`) |
-| `prompts.py` | The three `ChatPromptTemplate`s: `query_rewriter_prompt`, `answer_generation_prompt` (text mode, Markdown) and `voice_answer_generation_prompt` (voice mode: short spoken sentences, no Markdown), plus an unused `SYSTEM_PROMPT` string. The two answer prompts are built from shared string pieces (`_ANSWER_INTRO`, `_CITATION_RULES_AND_CONTEXT`) and differ only in their formatting rules, so the citation rules cannot drift apart |
-| `types.py` | Pydantic `BaseModel`s `PageData` and `ChunkData` (strict `extra="forbid"`); `ChunkData` also carries `content_hash` and an optional `embedding` |
+| `prompts.py` | The four `ChatPromptTemplate`s: `query_rewriter_prompt`, `answer_generation_prompt` (text mode, Markdown), `voice_answer_generation_prompt` (voice mode: short spoken sentences, no Markdown) and `key_terms_prompt`, plus an unused `SYSTEM_PROMPT` string. The two answer prompts are built from shared string pieces (`_ANSWER_INTRO`, `_CITATION_RULES_AND_CONTEXT`) and differ only in their formatting rules, so the citation rules cannot drift apart |
+| `types.py` | Pydantic `BaseModel`s `PageData`, `ChunkData` and `KeyTerms` (all strict `extra="forbid"`); `ChunkData` also carries `content_hash` and an optional `embedding`; `KeyTerms` (`terms: list[str]`) is the structured-output schema for key term extraction |
+| `key_terms.py` | `extract_key_terms(title, texts)`: one `llm.with_structured_output(KeyTerms)` call on the title + first pages (cut to 8,000 chars), then cleans every term for both speech-to-text providers (whitespace collapsed, no `<`/`>`, ≤ 5 words, ≤ 50 chars, case-insensitive dedupe, max 40). Never raises: logs and returns `[]` |
 | `parser.py` | PDF text extraction via `pypdf`; `render_answer()` converts raw markdown + `[Page N]` markers to safe HTML |
 | `embedder.py` | Chunking (`RecursiveCharacterTextSplitter`, 1600/200) with SHA-256 hashing, batch embedding (`text-embedding-3-small`, skips chunks that already have an embedding), pgvector cosine retrieval |
-| `ingestor.py` | `ingest_chunks` — atomic new `Chat` + `DocumentChunk` save; `reingest_chunks` — hash-based embedding reuse then atomic chunk replacement on an existing `Chat` |
+| `ingestor.py` | `ingest_chunks` — atomic new `Chat` (with `key_terms`) + `DocumentChunk` save; `reingest_chunks` — hash-based embedding reuse then atomic chunk replacement on an existing `Chat` |
 | `query_rewriter.py` | Rewrites follow-up questions into standalone retrieval queries, using the last 6 history messages; returns the original query unchanged when there is no history |
 | `reranker.py` | Cross-encoder scoring (`cross-encoder/ms-marco-MiniLM-L-6-v2`), filters below `RERANK_THRESHOLD=3`, falls back to the top chunk if everything is filtered |
 | `generate_response.py` | `generate_response_stream`: picks `generate_answer_chain` or `voice_answer_chain` from `mode`, builds the context, trims history to the token budget (counting the chosen prompt's system message; drops oldest first), then streams the chain (`chain.stream`), yielding text fragments |
@@ -73,7 +74,7 @@ Each file has exactly one responsibility:
 ### Key design decisions
 
 - The `CrossEncoder` model and `OpenAIEmbeddings` / `splitter` instances are initialized once at module import time — they are singletons per Django worker process. The reranker model (~80MB) downloads from HuggingFace on first run and caches at `~/.cache/huggingface/hub/`.
-- **One LLM instance serves both calls.** `query_rewriter.py` and `generate_response.py` both import the same `llm` from `config.py`; there is no separate cheaper model for rewriting. Any change to `config.llm` affects both.
+- **One LLM instance serves every call.** `query_rewriter.py`, `generate_response.py` and `key_terms.py` all import the same `llm` from `config.py`; there is no separate cheaper model for rewriting or key terms. Any change to `config.llm` affects all of them.
 - `TOKEN_BUFFER` does double duty: it is both the reserve subtracted from the history budget *and* the `max_tokens` output cap on the `llm` instance. Changing it changes both behaviors.
 - `ChatMessage.content` stores raw markdown + `[Page N]` citation markers. It is rendered to HTML in **two** places: the `render_answer` template filter (`chats/templatetags/chat_extras.py`) for server-rendered history, and `ChatMessageSerializer.content_html` for API responses — the SSE `done` event (which `chat.html` swaps in when an answer finishes streaming) and `GET /messages/`. Both call `parser.render_answer`; `content_html` is `null` for user messages.
 - `DocumentChunk.embedding` is a 1536-dim `VectorField` (pgvector). Vector similarity search uses `CosineDistance` from `pgvector.django`.
@@ -86,7 +87,7 @@ PostgreSQL with the `pgvector` extension is required — SQLite is not supported
 
 `docker-compose.yml` publishes `${POSTGRES_PORT}:5432` with no fallback — the port comes entirely from `.env`. This project uses **9002** by convention (README example and the running container).
 
-Migrations: `0001_initial` (extension + all three models), `0002_add_content_hash_to_documentchunk` (adds `content_hash` and backfills SHA-256 hashes for existing rows), `0003_chatmessage_mode` (adds `ChatMessage.mode`, `"text"` or `"voice"`, default `"text"`; existing rows become `"text"`).
+Migrations: `0001_initial` (extension + all three models), `0002_add_content_hash_to_documentchunk` (adds `content_hash` and backfills SHA-256 hashes for existing rows), `0003_chatmessage_mode` (adds `ChatMessage.mode`, `"text"` or `"voice"`, default `"text"`; existing rows become `"text"`), `0004_chat_key_terms` (adds `Chat.key_terms`, `jsonb`, default `[]`; no backfill, so chats created before it keep `[]`).
 
 ### URL structure
 
@@ -140,3 +141,5 @@ Optional: `DEBUG` (default `False`), `ALLOWED_HOSTS` (default `127.0.0.1`), `CSR
 *Verified 2026-11-02 against `main` @ `af78051` plus the streaming-only change in the working tree. Routes, pagination shape, CSRF behavior, the `runserver` default port, the 405 on `POST /messages/`, and the SSE protocol (events, headers, 400/404 before the stream, no save on disconnect, header timing) were checked by executing them, not read from prior docs. Not exercised: the ASGI buffering claim (read from `django/http/response.py`, `sync_to_async(list)`) and the `chat.html` consumer in a real browser.*
 
 *Voice-mode Stage 1 (`ChatMessage.mode`, `mode` in the ask body, the voice answer prompt) verified 2026-11-04 against `main` @ `aeb0e86` plus the B3 working-tree change, by real requests to `/messages/stream/`: no `mode` / `"voice"` / `"loud"` (400), and text vs voice answers on the same questions.*
+
+*Voice-mode B4 (`Chat.key_terms`) verified 2026-11-04 against `main` @ `7615cb5` plus the B4 working-tree change: real `POST /chats/api/` and `/reupload/` with generated PDFs (terms extracted, then replaced on re-upload), and upload/re-upload through the real view with the key-terms chain forced to raise (201/200, `key_terms == []`). `key_terms` is not exposed by any serializer.*

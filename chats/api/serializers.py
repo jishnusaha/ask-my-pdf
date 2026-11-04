@@ -4,6 +4,7 @@ from chats.models import Chat, ChatMessage, DocumentChunk
 from chats.services.rag.parser import render_answer, extract_text_by_page
 from chats.services.rag.embedder import chunk_pages, embed_chunks
 from chats.services.rag.ingestor import ingest_chunks
+from chats.services.rag.key_terms import extract_key_terms
 
 
 class ChatSerializer(serializers.ModelSerializer):
@@ -42,7 +43,9 @@ class ChatCreateSerializer(serializers.Serializer):
         pages = extract_text_by_page(file)
         chunks = chunk_pages(pages)
         embedded_chunks = embed_chunks(chunks)
-        return ingest_chunks(title, embedded_chunks)
+        # LLM call, kept outside ingest_chunks' transaction; returns [] on failure
+        key_terms = extract_key_terms(title, [p.text for p in pages[:3]])
+        return ingest_chunks(title, embedded_chunks, key_terms)
 
 
 class MessageCreateSerializer(serializers.Serializer):

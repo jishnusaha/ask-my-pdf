@@ -11,6 +11,7 @@ from chats.models import Chat, ChatMessage
 from chats.services.rag.parser import extract_text_by_page
 from chats.services.rag.embedder import chunk_pages
 from chats.services.rag.ingestor import reingest_chunks
+from chats.services.rag.key_terms import extract_key_terms
 from chats.services.rag.pipeline import ask_stream
 
 from .serializers import (
@@ -104,6 +105,10 @@ class ChatReuploadAPIView(APIView):
         pages = extract_text_by_page(file)
         chunks = chunk_pages(pages)
         reingest_chunks(chat, chunks)
+
+        # the PDF changed, so its terms must too; [] on failure (old terms would be wrong)
+        chat.key_terms = extract_key_terms(chat.title, [p.text for p in pages[:3]])
+        chat.save(update_fields=["key_terms"])
         return Response(ChatSerializer(chat).data)
 
 
