@@ -13,7 +13,7 @@ from chats.services.rag.embedder import chunk_pages
 from chats.services.rag.ingestor import reingest_chunks
 from chats.services.rag.key_terms import extract_key_terms
 from chats.services.rag.pipeline import ask_stream
-from chats.services.voice.transcriber import transcribe
+from chats.services.voice.transcriber import TranscriptionUnavailable, transcribe
 
 from .serializers import (
     ChatSerializer,
@@ -121,12 +121,22 @@ class TranscribeAPIView(APIView):
         serializer.is_valid(raise_exception=True)
 
         # the audio is never stored: read, send to the provider, let it go
-        text = transcribe(
-            serializer.validated_data["audio"].read(),
-            serializer.validated_data["filename"],
-            chat.key_terms,
-            chat.title,
-        )
+        try:
+            text = transcribe(
+                serializer.validated_data["audio"].read(),
+                serializer.validated_data["filename"],
+                chat.key_terms,
+                chat.title,
+            )
+        except TranscriptionUnavailable:
+            # both providers failed (already logged); "detail" is what the
+            # frontend's error helper reads
+            return Response(
+                {
+                    "detail": "Voice input is unavailable right now, please type your question."
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response({"text": text})
 
 

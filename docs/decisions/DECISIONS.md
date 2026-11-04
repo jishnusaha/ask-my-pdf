@@ -144,3 +144,23 @@ listed only `< >`).
 - ElevenLabs `no_verbatim` filler removal: the plan (B7) keeps the original
   question for display and saving and cleans only the search query, and the
   OpenAI fallback has no equivalent.
+
+## 2026-11-04 — ElevenLabs "out of credits" is `detail.code == "insufficient_credits"`; the OpenAI fallback also fails fast
+
+`_is_quota_error` in `chats/services/voice/transcriber.py` pauses ElevenLabs
+(6 h, `LocMemCache`) only when the error body has
+`detail.code == "insufficient_credits"` or the legacy
+`detail.status == "quota_exceeded"`. Every other ElevenLabs error falls back to
+OpenAI without pausing. The OpenAI client uses `timeout=15, max_retries=0`.
+
+**Why:** the voice plan's `detail.status == "quota_exceeded"` came from an
+older help-center article. ElevenLabs' current error docs list
+`insufficient_credits` (type `payment_required`, HTTP 402) and call `status`
+"a legacy field that is no longer used, instead use the `code` property".
+A wrong guess is harmless: the request still falls back; only the pause is
+lost. OpenAI's SDK default is 2 retries and a 600 s timeout; same reasoning as
+the 2026-11-04 fail-fast entry for ElevenLabs.
+
+**Rules out:**
+- Detecting quota from the HTTP status code (401 also means a wrong key).
+- Pausing ElevenLabs on errors other than quota.
