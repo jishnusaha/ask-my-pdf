@@ -9,10 +9,12 @@ logger = logging.getLogger(__name__)
 MAX_INPUT_CHARS = 8000  # caps the cost when the first pages are huge
 MAX_TERMS = 40
 # limits shared by both speech-to-text providers: ElevenLabs allows at most
-# 5 words and 50 characters per keyterm; OpenAI rejects the whole request if
-# a keyword contains "<", ">" or a line break
+# 5 words and 50 characters per keyterm and rejects < > { } [ ] \ (elevenlabs
+# SDK docstring for speech_to_text.convert); OpenAI rejects the whole request
+# if a keyword contains "<", ">" or a line break
 MAX_TERM_WORDS = 5
 MAX_TERM_CHARS = 50
+FORBIDDEN_CHARS = frozenset("<>{}[]\\")
 
 key_terms_chain = key_terms_prompt | llm.with_structured_output(KeyTerms)
 
@@ -38,14 +40,14 @@ def extract_key_terms(title: str, texts: list[str]) -> list[str]:
 def _clean_terms(terms: list[str]) -> list[str]:
     """
     Normalizes whitespace (which also removes line breaks), then drops terms
-    that are empty, contain "<" or ">", are too long, or repeat an earlier
-    term (case-insensitive). Keeps the first MAX_TERMS.
+    that are empty, contain a FORBIDDEN_CHARS character, are too long, or
+    repeat an earlier term (case-insensitive). Keeps the first MAX_TERMS.
     """
     cleaned = []
     seen = set()
     for term in terms:
         term = " ".join(term.split())
-        if not term or "<" in term or ">" in term:
+        if not term or not FORBIDDEN_CHARS.isdisjoint(term):
             continue
         if len(term) > MAX_TERM_CHARS or len(term.split()) > MAX_TERM_WORDS:
             continue

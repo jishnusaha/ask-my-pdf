@@ -41,6 +41,10 @@ CSRF_TRUSTED_ORIGINS = env.list(
 
 CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=[])
 
+# Speech-to-text (voice mode). Optional: an empty key means "skip ElevenLabs",
+# so the server still starts without it.
+ELEVENLABS_API_KEY = env("ELEVENLABS_API_KEY", default="")
+
 
 # Application definition
 

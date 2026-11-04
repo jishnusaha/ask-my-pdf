@@ -184,6 +184,9 @@ POSTGRES_HOST=localhost
 POSTGRES_PORT=9002
 ALLOWED_HOSTS=127.0.0.1
 CSRF_TRUSTED_ORIGINS=http://127.0.0.1:9001
+CORS_ALLOWED_ORIGINS=http://localhost:3000
+# optional — voice input (speech-to-text); leave empty to skip ElevenLabs
+ELEVENLABS_API_KEY=
 ```
 
 ### 5. Run migrations

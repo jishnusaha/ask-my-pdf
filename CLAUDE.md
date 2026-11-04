@@ -62,7 +62,7 @@ Each file has exactly one responsibility:
 | `config.py` | `MODEL_NAME` (`gpt-4.1-mini`), `TOKEN_LIMIT`, `TOKEN_BUFFER`, `RERANK_THRESHOLD`, the single shared `llm` instance (`ChatOpenAI`, `temperature=0.2`) |
 | `prompts.py` | The four `ChatPromptTemplate`s: `query_rewriter_prompt`, `answer_generation_prompt` (text mode, Markdown), `voice_answer_generation_prompt` (voice mode: short spoken sentences, no Markdown) and `key_terms_prompt`, plus an unused `SYSTEM_PROMPT` string. The two answer prompts are built from shared string pieces (`_ANSWER_INTRO`, `_CITATION_RULES_AND_CONTEXT`) and differ only in their formatting rules, so the citation rules cannot drift apart |
 | `types.py` | Pydantic `BaseModel`s `PageData`, `ChunkData` and `KeyTerms` (all strict `extra="forbid"`); `ChunkData` also carries `content_hash` and an optional `embedding`; `KeyTerms` (`terms: list[str]`) is the structured-output schema for key term extraction |
-| `key_terms.py` | `extract_key_terms(title, texts)`: one `llm.with_structured_output(KeyTerms)` call on the title + first pages (cut to 8,000 chars), then cleans every term for both speech-to-text providers (whitespace collapsed, no `<`/`>`, ≤ 5 words, ≤ 50 chars, case-insensitive dedupe, max 40). Never raises: logs and returns `[]` |
+| `key_terms.py` | `extract_key_terms(title, texts)`: one `llm.with_structured_output(KeyTerms)` call on the title + first pages (cut to 8,000 chars), then cleans every term for both speech-to-text providers (whitespace collapsed, none of `< > { } [ ] \`, ≤ 5 words, ≤ 50 chars, case-insensitive dedupe, max 40). Never raises: logs and returns `[]` |
 | `parser.py` | PDF text extraction via `pypdf`; `render_answer()` converts raw markdown + `[Page N]` markers to safe HTML |
 | `embedder.py` | Chunking (`RecursiveCharacterTextSplitter`, 1600/200) with SHA-256 hashing, batch embedding (`text-embedding-3-small`, skips chunks that already have an embedding), pgvector cosine retrieval |
 | `ingestor.py` | `ingest_chunks` — atomic new `Chat` (with `key_terms`) + `DocumentChunk` save; `reingest_chunks` — hash-based embedding reuse then atomic chunk replacement on an existing `Chat` |
@@ -70,6 +70,16 @@ Each file has exactly one responsibility:
 | `reranker.py` | Cross-encoder scoring (`cross-encoder/ms-marco-MiniLM-L-6-v2`), filters below `RERANK_THRESHOLD=3`, falls back to the top chunk if everything is filtered |
 | `generate_response.py` | `generate_response_stream`: picks `generate_answer_chain` or `voice_answer_chain` from `mode`, builds the context, trims history to the token budget (counting the chosen prompt's system message; drops oldest first), then streams the chain (`chain.stream`), yielding text fragments |
 | `pipeline.py` | `ask_stream()` (generator): rewrite → retrieve → rerank → stream the answer → `bulk_create` of user + assistant rows once complete, both carrying `mode` |
+
+### Voice service layer (`chats/services/voice/`)
+
+Speech-to-text is not part of RAG, so it has its own package. `transcriber.py`: `transcribe(audio_bytes, filename, key_terms, title) -> str` is the only entry point — callers never know the provider. Today it calls ElevenLabs only (`elevenlabs` SDK, model `scribe_v2`); the OpenAI fallback (voice-mode plan B6) is not built yet.
+
+- `key_terms` are sent as `keyterms` only when non-empty (`+20%` cost per the SDK docstring; chats created before key terms have `[]`).
+- `tag_audio_events=False`, so no `(laughter)`-style tags end up in the question text.
+- `timeout=8` on the client is an httpx **per-phase** timeout (connect / upload / each wait for data), not a cap on the whole request.
+- `request_options={"max_retries": 0}`: the SDK otherwise retries 5xx/408/409/429 twice with backoff (3 billed attempts).
+- The response type is a union; anything but `SpeechToTextChunkResponseModel` raises `TypeError`.
 
 ### Key design decisions
 
@@ -110,12 +120,14 @@ There is **no route at `/`** — it returns 404. The entry point is `/chats/`. `
 | `POST` | `/chats/api/<pk>/messages/stream/` | `MessageStreamAPIView` | Send a question (`question`); streams the answer as Server-Sent Events (see below). The only way to ask; used by the chat page. |
 | `POST` | `/chats/api/<pk>/reupload/` | `ChatReuploadAPIView` | Replace PDF for an existing chat (`pdf` file) |
 | `GET` | `/chats/api/<pk>/chunks/` | `ChunkListAPIView` | List stored chunks |
+| `POST` | `/chats/api/<pk>/transcribe/` | `TranscribeAPIView` | Speech-to-text for one recorded question (multipart `audio`); returns `{"text": "..."}` (see below) |
 
 ### API behavior worth knowing
 
 - **All three GET list endpoints are paginated**, not just chunks. `DEFAULT_PAGINATION_CLASS = LimitOffsetPagination` with `PAGE_SIZE = 20` is global, so `/chats/api/`, `/chats/api/<pk>/messages/` and `/chats/api/<pk>/chunks/` all return `{"count", "next", "previous", "results"}` and all accept `limit`/`offset`. No client in the repo calls these GETs — the sidebar and chat history are server-rendered by the template views — but they are kept as the JSON read API.
 - **The API is unauthenticated and effectively CSRF-exempt.** `DEFAULT_AUTHENTICATION_CLASSES` and `DEFAULT_PERMISSION_CLASSES` are both `[]`, so DRF never runs `SessionAuthentication.enforce_csrf`. POSTs without a CSRF token reach the view and are processed. This is why the templates' `fetch()` calls send no token. Anyone who can reach the server can read every chat and spend OpenAI credit; adding auth means adding CSRF handling to the templates' `fetch()` calls at the same time.
 - Chats have no owner field and no scoping — the sidebar lists every chat in the database for every visitor.
+- **Transcribe (`/transcribe/`).** Multipart, one file field `audio`. Order: unknown chat → 404; then `TranscribeSerializer` → 400 for a missing/empty file, over 5 MB, or an extension other than `webm`/`mp4`/`m4a`/`wav` (checked by extension, not `content_type`; no `ogg`). Then `transcribe(...)` with the chat's `key_terms` and `title`, and `200 {"text": "..."}` (stripped; `""` when nothing was said). The client's filename is never forwarded: the provider gets `audio.<validated ext>`. The audio is never stored. **Provider errors are not handled yet** — an ElevenLabs failure (or an empty `ELEVENLABS_API_KEY`) is an uncaught exception, so a 500, until B6. Like the ask endpoint it is unauthenticated, so anyone who can reach the server can spend ElevenLabs credits.
 - **Streaming protocol (`/messages/stream/`).** Body `{"question": "...", "mode": "text" | "voice"}`. `mode` is optional (default `"text"`); any other value is a 400 (`{"mode": ["\"loud\" is not a valid choice."]}`) before the stream starts. `mode` means voice mode was on for the turn, not how the question was entered; `"voice"` selects the voice answer prompt and is saved on both rows. `mode` is not yet returned in `ChatMessageSerializer` output (voice-mode plan step B8). Response is `text/event-stream` with `Cache-Control: no-cache` and `X-Accel-Buffering: no`; every frame is `event: <name>\ndata: <single-line JSON>\n\n`:
   - `token` → `{"delta": "<text fragment>"}`, zero or more.
   - `done` → `[user_msg, assistant_msg]`, serialized with `ChatMessageSerializer` (assistant `content_html` rendered server-side).
@@ -134,7 +146,7 @@ Loaded via `django-environ` from `.env` at project root.
 
 Required (no default — startup fails if missing): `SECRET_KEY`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_PORT`. `OPENAI_API_KEY` is not read by `settings.py` — the OpenAI SDK picks it up from the environment, so it is required at request time rather than at startup.
 
-Optional: `DEBUG` (default `False`), `ALLOWED_HOSTS` (default `127.0.0.1`), `CSRF_TRUSTED_ORIGINS` (default `http://127.0.0.1:9001`).
+Optional: `DEBUG` (default `False`), `ALLOWED_HOSTS` (default `127.0.0.1`), `CSRF_TRUSTED_ORIGINS` (default `http://127.0.0.1:9001`), `CORS_ALLOWED_ORIGINS` (default `[]`, comma-separated), `ELEVENLABS_API_KEY` (default `""`; read as `settings.ELEVENLABS_API_KEY` for voice input — empty means ElevenLabs is skipped, so the server starts without it).
 
 ---
 
@@ -143,3 +155,5 @@ Optional: `DEBUG` (default `False`), `ALLOWED_HOSTS` (default `127.0.0.1`), `CSR
 *Voice-mode Stage 1 (`ChatMessage.mode`, `mode` in the ask body, the voice answer prompt) verified 2026-11-04 against `main` @ `aeb0e86` plus the B3 working-tree change, by real requests to `/messages/stream/`: no `mode` / `"voice"` / `"loud"` (400), and text vs voice answers on the same questions.*
 
 *Voice-mode B4 (`Chat.key_terms`) verified 2026-11-04 against `main` @ `7615cb5` plus the B4 working-tree change: real `POST /chats/api/` and `/reupload/` with generated PDFs (terms extracted, then replaced on re-upload), and upload/re-upload through the real view with the key-terms chain forced to raise (201/200, `key_terms == []`). `key_terms` is not exposed by any serializer.*
+
+*Voice-mode B5 (`/transcribe/`) verified 2026-11-04 against `main` @ `839509a` plus the B5 working-tree change: the seven 400/404/405 cases by real requests to the running server; two real ElevenLabs transcriptions (3.2 s wav with 16 keyterms, 1.8 s m4a without) through the real route and view, with the outgoing request observed (keyterms count, fixed filename); the retry setting checked offline against fake 503 responses (1 attempt vs the SDK default's 3). Not exercised: a real `webm`/`mp4` browser recording, nginx's upload limit, silence → `""`.*

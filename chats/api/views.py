@@ -13,6 +13,7 @@ from chats.services.rag.embedder import chunk_pages
 from chats.services.rag.ingestor import reingest_chunks
 from chats.services.rag.key_terms import extract_key_terms
 from chats.services.rag.pipeline import ask_stream
+from chats.services.voice.transcriber import transcribe
 
 from .serializers import (
     ChatSerializer,
@@ -20,6 +21,7 @@ from .serializers import (
     ChatMessageSerializer,
     MessageCreateSerializer,
     DocumentChunkSerializer,
+    TranscribeSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -110,6 +112,22 @@ class ChatReuploadAPIView(APIView):
         chat.key_terms = extract_key_terms(chat.title, [p.text for p in pages[:3]])
         chat.save(update_fields=["key_terms"])
         return Response(ChatSerializer(chat).data)
+
+
+class TranscribeAPIView(APIView):
+    def post(self, request, pk):
+        chat = get_object_or_404(Chat, pk=pk)
+        serializer = TranscribeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        # the audio is never stored: read, send to the provider, let it go
+        text = transcribe(
+            serializer.validated_data["audio"].read(),
+            serializer.validated_data["filename"],
+            chat.key_terms,
+            chat.title,
+        )
+        return Response({"text": text})
 
 
 class ChunkListAPIView(generics.ListAPIView):

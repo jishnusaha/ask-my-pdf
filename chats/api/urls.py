@@ -6,6 +6,7 @@ from chats.api.views import (
     MessageStreamAPIView,
     ChatReuploadAPIView,
     ChunkListAPIView,
+    TranscribeAPIView,
 )
 
 urlpatterns = [
@@ -18,4 +19,7 @@ urlpatterns = [
     ),
     path("<int:pk>/reupload/", ChatReuploadAPIView.as_view(), name="api_chat_reupload"),
     path("<int:pk>/chunks/", ChunkListAPIView.as_view(), name="api_chat_chunks"),
+    path(
+        "<int:pk>/transcribe/", TranscribeAPIView.as_view(), name="api_chat_transcribe"
+    ),
 ]

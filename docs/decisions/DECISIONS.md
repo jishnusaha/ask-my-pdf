@@ -121,3 +121,26 @@ the text-mode answer found it.
 - Naming the field `input_mode`.
 - Editing the citation rules in only one of the two answer prompts.
 - Shortening voice answers by lowering `TOKEN_BUFFER` / `max_tokens`.
+
+## 2026-11-04 — Speech-to-text calls fail fast and send nothing client-written but the audio
+
+In `chats/services/voice/transcriber.py`, the ElevenLabs call uses
+`request_options={"max_retries": 0}` and `timeout=8`, and
+`TranscribeAPIView` sends the provider `audio.<validated ext>`, never the
+client's filename.
+
+**Why:** the SDK retries 5xx/408/409/429 twice with backoff by default
+(3 billed attempts, measured offline against fake 503s), and the user waits
+through all of them. Once the OpenAI fallback exists (B6), the right reaction
+to an ElevenLabs failure is to switch providers, not retry. The `timeout` is
+httpx per-phase, not a whole-request cap: one real call took 16.5 s with it set.
+
+Key-term cleaning drops `< > { } [ ] \` (the ElevenLabs SDK docstring for
+`speech_to_text.convert` forbids `{ } [ ] \` as well as `< >`; the voice plan
+listed only `< >`).
+
+**Rules out:**
+- Relying on SDK retries for transcription reliability.
+- ElevenLabs `no_verbatim` filler removal: the plan (B7) keeps the original
+  question for display and saving and cleans only the search query, and the
+  OpenAI fallback has no equivalent.
