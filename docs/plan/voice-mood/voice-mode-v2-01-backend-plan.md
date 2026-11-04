@@ -30,8 +30,8 @@ Today's ask flow, for reference: `MessageStreamAPIView.post` validates `question
 - [x] B4: Extract key terms at upload and re-upload (new chats only) (2026-11-04, `839509a`)
 - [x] B5: The transcribe endpoint (ElevenLabs) (2026-11-04, `3196437`)
 - [x] B6: OpenAI fallback (2026-11-04, `6445853`; offline-verified only, real OpenAI call pending)
-- [x] B7: Clean filler words in the rewrite step (2026-11-04; offline-verified, real LLM output not checked)
-- [ ] B8: Return `mode` in the message API
+- [x] B7: Clean filler words in the rewrite step (2026-11-04, `47679f7`; offline-verified, real LLM output not checked)
+- [x] B8: Return `mode` in the message API (2026-11-05)
 
 ---
 

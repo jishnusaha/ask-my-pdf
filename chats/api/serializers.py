@@ -21,7 +21,7 @@ class ChatMessageSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ChatMessage
-        fields = ["id", "role", "content", "content_html", "created_at"]
+        fields = ["id", "role", "mode", "content", "content_html", "created_at"]
 
     def get_content_html(self, obj):
         if obj.role == "assistant":
