@@ -1,10 +1,8 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-query_rewriter_prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            """You are a query rewriting assistant. Your job is to rewrite the user's latest 
+# The rewrite prompts share everything but their last rules: the voice version
+# also removes fillers, even from a question that is already standalone.
+_REWRITE_INTRO_AND_RULES = """You are a query rewriting assistant. Your job is to rewrite the user's latest 
                 question into a standalone search query for retrieving relevant document chunks 
                 from a vector database.
 
@@ -13,20 +11,37 @@ query_rewriter_prompt = ChatPromptTemplate.from_messages(
                 - The rewritten query should make sense WITHOUT the chat history
                 - Keep it concise — one sentence, search-query style
                 - Do NOT answer the question, only rewrite it
-                - If the question is already standalone, return it as-is
-            """,
-        ),
-        (
-            "human",
-            """Chat History:
+"""
+
+_TEXT_REWRITE_LAST_RULE = """                - If the question is already standalone, return it as-is
+            """
+
+_VOICE_REWRITE_LAST_RULES = """                - The question was spoken: remove filler words (um, uh, like, you know), repeated words
+                  and false starts. Keep the meaning.
+                - If the question is already standalone, return it as-is, but still without the filler
+                  words, repeated words and false starts
+            """
+
+_REWRITE_HUMAN = """Chat History:
                 {chat_history}
 
                 Latest Question:
                 {question}
 
                 Rewritten Query:
-            """,
-        ),
+            """
+
+query_rewriter_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", _REWRITE_INTRO_AND_RULES + _TEXT_REWRITE_LAST_RULE),
+        ("human", _REWRITE_HUMAN),
+    ]
+)
+
+voice_query_rewriter_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", _REWRITE_INTRO_AND_RULES + _VOICE_REWRITE_LAST_RULES),
+        ("human", _REWRITE_HUMAN),
     ]
 )
 

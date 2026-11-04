@@ -24,11 +24,15 @@ def ask_stream(
     the LLM call fails, so no partial answer is ever stored.
     """
 
-    rewritten_query = get_rewritten_query(original_query, chat_history)
+    rewritten_query = get_rewritten_query(original_query, chat_history, mode)
 
     retrieved_chunks = retrieve_chunks(chat_id, rewritten_query)
 
-    reranked_chunks = rerank_chunks(original_query, retrieved_chunks)
+    # voice: score against the filler-free query too (fillers add noise to the
+    # cross-encoder); text: unchanged, scored against the original question.
+    # Answer generation and saving always use the original question.
+    rerank_query = rewritten_query if mode == ChatMessage.Mode.VOICE else original_query
+    reranked_chunks = rerank_chunks(rerank_query, retrieved_chunks)
 
     parts = []
     for delta in generate_response_stream(
