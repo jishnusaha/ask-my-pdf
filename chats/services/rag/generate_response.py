@@ -4,28 +4,37 @@ import tiktoken
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate
 from chats.models import ChatMessage, DocumentChunk
 
 from .config import llm, MODEL_NAME, TOKEN_BUFFER, TOKEN_LIMIT
-from .prompts import answer_generation_prompt
+from .prompts import answer_generation_prompt, voice_answer_generation_prompt
 
 generate_answer_chain = answer_generation_prompt | llm | StrOutputParser()
+voice_answer_chain = voice_answer_generation_prompt | llm | StrOutputParser()
 
 
 def generate_response_stream(
     original_query: str,
     chat_history: list[ChatMessage],
     chunks: list[DocumentChunk],
+    mode: ChatMessage.Mode,
 ) -> Iterator[str]:
     """
     Generates a response to the original query based on the retrieved chunks and chat history,
     yielding the answer as it is generated, one text fragment at a time.
+    Voice mode uses the voice prompt (short spoken sentences, no Markdown).
     """
+    if mode == ChatMessage.Mode.VOICE:
+        prompt, chain = voice_answer_generation_prompt, voice_answer_chain
+    else:
+        prompt, chain = answer_generation_prompt, generate_answer_chain
+
     pdf_context = "\n\n".join(
         [f"[Page {chunk.page_number}]\n{chunk.content}" for chunk in chunks]
     )
     # calculate budget
-    system_tokens = _get_system_prompt_tokens(pdf_context)
+    system_tokens = _get_system_prompt_tokens(prompt, pdf_context)
     original_query_tokens = _count_tokens(original_query, MODEL_NAME)
     budget = TOKEN_LIMIT - TOKEN_BUFFER - system_tokens - original_query_tokens
 
@@ -35,7 +44,7 @@ def generate_response_stream(
     langchain_messages = _to_langchain_messages(trimmed_history)
 
     # the chain ends in StrOutputParser, so .stream() yields str fragments
-    yield from generate_answer_chain.stream(
+    yield from chain.stream(
         {
             "context": pdf_context,
             "chat_history": langchain_messages,  # MessagesPlaceholder expects a list of LangChain messages
@@ -44,8 +53,8 @@ def generate_response_stream(
     )
 
 
-def _get_system_prompt_tokens(pdf_context: str) -> int:
-    rendered_messages = answer_generation_prompt.format_messages(
+def _get_system_prompt_tokens(prompt: ChatPromptTemplate, pdf_context: str) -> int:
+    rendered_messages = prompt.format_messages(
         context=pdf_context,
         chat_history=[],  # empty, we just want system message tokens
         question="",  # empty, we just want system message tokens

@@ -9,7 +9,10 @@ from .generate_response import generate_response_stream
 
 
 def ask_stream(
-    chat_id: int, original_query: str, chat_history: list[ChatMessage], mode: str
+    chat_id: int,
+    original_query: str,
+    chat_history: list[ChatMessage],
+    mode: ChatMessage.Mode,
 ) -> Iterator[str]:
     """
     Handles the process of asking a question in a chat session.
@@ -29,7 +32,7 @@ def ask_stream(
 
     parts = []
     for delta in generate_response_stream(
-        original_query, chat_history, reranked_chunks
+        original_query, chat_history, reranked_chunks, mode
     ):
         parts.append(delta)
         yield delta

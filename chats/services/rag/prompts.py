@@ -40,20 +40,33 @@ SYSTEM_PROMPT = """
 """
 
 
-answer_generation_prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            """
+# The answer system prompt is split so the text and voice prompts share the intro
+# and the citation rules word for word; only the formatting rules differ.
+# render_answer and the frontend speech cleaner both rely on the exact [Page N] format.
+_ANSWER_INTRO = """
                 You are a helpful assistant that answers questions based strictly on the provided PDF context.
 
                 The context is made up of blocks, and each block starts with a page marker like "[Page N]".
 
-                Formatting rules:
+"""
+
+_TEXT_FORMATTING_RULES = """                Formatting rules:
                 - Answer using clear, well-structured Markdown: short paragraphs, **bold** for key terms,
                   and "- " bullet lists where it helps readability.
 
-                Citation rules:
+"""
+
+_VOICE_FORMATTING_RULES = """                Formatting rules:
+                - The answer will be read aloud. Answer in a few short, plain spoken sentences.
+                - Do not use any Markdown: no bullet or numbered lists, no tables, no bold or italics,
+                  no headings, no code blocks, and no links or URLs.
+                - If the user asks for a table, a list or another visual format, give the same information
+                  in spoken sentences instead. Never refuse or say the answer is missing because of the format.
+                - Earlier answers in the chat history may use Markdown. Do not copy that style.
+
+"""
+
+_CITATION_RULES_AND_CONTEXT = """                Citation rules:
                 - After every sentence or bullet that uses information from the context, cite the source
                   page inline using the exact format [Page N] (for example: "Revenue grew 12% [Page 4].").
                 - If a statement draws on multiple pages, cite each one, e.g. "[Page 2] [Page 5]".
@@ -65,7 +78,25 @@ answer_generation_prompt = ChatPromptTemplate.from_messages(
 
                 Context from the PDF:
                 {context}
-            """,
+            """
+
+answer_generation_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            _ANSWER_INTRO + _TEXT_FORMATTING_RULES + _CITATION_RULES_AND_CONTEXT,
+        ),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{question}"),
+    ]
+)
+
+# same structure as answer_generation_prompt, so the token-budget code works unchanged
+voice_answer_generation_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            _ANSWER_INTRO + _VOICE_FORMATTING_RULES + _CITATION_RULES_AND_CONTEXT,
         ),
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", "{question}"),

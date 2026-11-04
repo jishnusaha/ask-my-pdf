@@ -92,3 +92,32 @@ query.
   result should read the `done` event, or ask via the stream and then call
   `GET /messages/`.
 - Treating the unused GETs as dead code.
+
+## 2026-11-04 — Voice mode is a `mode` flag on the existing ask path, with a second answer prompt built from shared pieces
+
+`ChatMessage.mode` (`"text"` / `"voice"`, default `"text"`) is stored on both
+rows of a turn and means "voice mode was on", not "the question was spoken"
+(in voice mode the user can still type). `"voice"` selects
+`voice_answer_generation_prompt`; everything else in the RAG pipeline is shared.
+Plan: `docs/plan/voice-mood/`.
+
+The text and voice answer prompts are concatenated from shared constants in
+`prompts.py` (`_ANSWER_INTRO`, `_CITATION_RULES_AND_CONTEXT`); only the
+formatting-rules piece differs. The text prompt renders byte-for-byte as before.
+
+**Why:** `render_answer` and the frontend speech cleaner both depend on the
+exact `[Page N]` format, so the citation rules must not drift between two copies.
+Answer length is set by the prompt, not by `max_tokens`, because `config.llm`
+(and `TOKEN_BUFFER` as its `max_tokens`) is shared with text mode.
+
+**Voice prompt must name a fallback for forbidden formats.** Without the line
+"If the user asks for a table, a list or another visual format, give the same
+information in spoken sentences instead", a voice question ending "in a table"
+answered "I couldn't find that in the document." on two of two runs, although
+the text-mode answer found it.
+
+**Rules out:**
+- A separate voice pipeline or endpoint for asking.
+- Naming the field `input_mode`.
+- Editing the citation rules in only one of the two answer prompts.
+- Shortening voice answers by lowering `TOKEN_BUFFER` / `max_tokens`.

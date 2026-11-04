@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from django.http import StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 
-from chats.models import Chat
+from chats.models import Chat, ChatMessage
 from chats.services.rag.parser import extract_text_by_page
 from chats.services.rag.embedder import chunk_pages
 from chats.services.rag.ingestor import reingest_chunks
@@ -61,7 +61,8 @@ class MessageStreamAPIView(APIView):
         serializer = MessageCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         question = serializer.validated_data["question"]
-        mode = serializer.validated_data["mode"]
+        # ChoiceField returns a plain str when mode is sent and the enum when defaulted
+        mode = ChatMessage.Mode(serializer.validated_data["mode"])
 
         response = StreamingHttpResponse(
             self._event_stream(chat, question, mode), content_type="text/event-stream"
@@ -70,7 +71,7 @@ class MessageStreamAPIView(APIView):
         response["X-Accel-Buffering"] = "no"  # stops nginx from buffering the stream
         return response
 
-    def _event_stream(self, chat, question, mode):
+    def _event_stream(self, chat, question, mode: ChatMessage.Mode):
         last_id = (
             chat.messages.order_by("-id").values_list("id", flat=True).first() or 0
         )

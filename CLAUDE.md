@@ -44,7 +44,7 @@ Django monolith with a RAG pipeline implemented as a service layer. Template vie
 `ChatListCreateAPIView.create` → `serializer.save()` → **`ChatCreateSerializer.create`** does the real work: `parser.extract_text_by_page` → `embedder.chunk_pages` (also computes the SHA-256 `content_hash`) → `embedder.embed_chunks` → `ingestor.ingest_chunks` (atomic DB write). The view itself only re-serializes the result with `ChatSerializer` and returns 201.
 
 **Data flow — question answering (API, streaming is the only path):**
-`MessageStreamAPIView.post` → `StreamingHttpResponse(_event_stream(...))` → `pipeline.ask_stream()` → query rewrite (`.invoke` — must finish before retrieval) → vector retrieval (top `k=5`) → cross-encoder rerank → `generate_response.generate_response_stream()` (token-aware prompt build, then `generate_answer_chain.stream(...)`) → each text fragment is yielded up as an SSE `token` event → once the answer is complete, `ChatMessage.bulk_create` saves the user + assistant rows → `_event_stream` re-queries them (`last_id` recorded before the call, then `id__gt=last_id`) and sends the `done` event. There is no non-streaming ask endpoint; `POST /chats/api/<pk>/messages/` returns 405.
+`MessageStreamAPIView.post` → `StreamingHttpResponse(_event_stream(...))` → `pipeline.ask_stream()` → query rewrite (`.invoke` — must finish before retrieval) → vector retrieval (top `k=5`) → cross-encoder rerank → `generate_response.generate_response_stream()` (picks the text or voice prompt and chain from `mode`, token-aware prompt build, then `chain.stream(...)`) → each text fragment is yielded up as an SSE `token` event → once the answer is complete, `ChatMessage.bulk_create` saves the user + assistant rows, both with the request's `mode` → `_event_stream` re-queries them (`last_id` recorded before the call, then `id__gt=last_id`) and sends the `done` event. There is no non-streaming ask endpoint; `POST /chats/api/<pk>/messages/` returns 405.
 
 - **Where errors land.** The chat lookup (404) and `MessageCreateSerializer` validation (400) run in `post()` before the response is built, so they are normal DRF JSON errors. Everything after that runs inside the generator, after the view has already returned a 200 response object, so any failure in rewrite/retrieve/rerank/generation becomes an SSE `error` event, not a 5xx.
 - **Headers are not sent immediately.** WSGI servers send nothing until the generator yields its first non-empty value (PEP 3333; `wsgiref.handlers.BaseHandler.write` sends headers on the first write). The first yield is the first LLM token, so the status line, headers and first token arrive together — measured 3.4–5.0 s after the request.
@@ -60,15 +60,15 @@ Each file has exactly one responsibility:
 | File | Responsibility |
 |---|---|
 | `config.py` | `MODEL_NAME` (`gpt-4.1-mini`), `TOKEN_LIMIT`, `TOKEN_BUFFER`, `RERANK_THRESHOLD`, the single shared `llm` instance (`ChatOpenAI`, `temperature=0.2`) |
-| `prompts.py` | The two `ChatPromptTemplate`s: `query_rewriter_prompt` and `answer_generation_prompt` (the latter carries the citation rules), plus an unused `SYSTEM_PROMPT` string |
+| `prompts.py` | The three `ChatPromptTemplate`s: `query_rewriter_prompt`, `answer_generation_prompt` (text mode, Markdown) and `voice_answer_generation_prompt` (voice mode: short spoken sentences, no Markdown), plus an unused `SYSTEM_PROMPT` string. The two answer prompts are built from shared string pieces (`_ANSWER_INTRO`, `_CITATION_RULES_AND_CONTEXT`) and differ only in their formatting rules, so the citation rules cannot drift apart |
 | `types.py` | Pydantic `BaseModel`s `PageData` and `ChunkData` (strict `extra="forbid"`); `ChunkData` also carries `content_hash` and an optional `embedding` |
 | `parser.py` | PDF text extraction via `pypdf`; `render_answer()` converts raw markdown + `[Page N]` markers to safe HTML |
 | `embedder.py` | Chunking (`RecursiveCharacterTextSplitter`, 1600/200) with SHA-256 hashing, batch embedding (`text-embedding-3-small`, skips chunks that already have an embedding), pgvector cosine retrieval |
 | `ingestor.py` | `ingest_chunks` — atomic new `Chat` + `DocumentChunk` save; `reingest_chunks` — hash-based embedding reuse then atomic chunk replacement on an existing `Chat` |
 | `query_rewriter.py` | Rewrites follow-up questions into standalone retrieval queries, using the last 6 history messages; returns the original query unchanged when there is no history |
 | `reranker.py` | Cross-encoder scoring (`cross-encoder/ms-marco-MiniLM-L-6-v2`), filters below `RERANK_THRESHOLD=3`, falls back to the top chunk if everything is filtered |
-| `generate_response.py` | `generate_response_stream`: builds the context, trims history to the token budget (drops oldest first), then streams the chain (`chain.stream`), yielding text fragments |
-| `pipeline.py` | `ask_stream()` (generator): rewrite → retrieve → rerank → stream the answer → `bulk_create` of user + assistant rows once complete |
+| `generate_response.py` | `generate_response_stream`: picks `generate_answer_chain` or `voice_answer_chain` from `mode`, builds the context, trims history to the token budget (counting the chosen prompt's system message; drops oldest first), then streams the chain (`chain.stream`), yielding text fragments |
+| `pipeline.py` | `ask_stream()` (generator): rewrite → retrieve → rerank → stream the answer → `bulk_create` of user + assistant rows once complete, both carrying `mode` |
 
 ### Key design decisions
 
@@ -86,7 +86,7 @@ PostgreSQL with the `pgvector` extension is required — SQLite is not supported
 
 `docker-compose.yml` publishes `${POSTGRES_PORT}:5432` with no fallback — the port comes entirely from `.env`. This project uses **9002** by convention (README example and the running container).
 
-Migrations: `0001_initial` (extension + all three models), `0002_add_content_hash_to_documentchunk` (adds `content_hash` and backfills SHA-256 hashes for existing rows).
+Migrations: `0001_initial` (extension + all three models), `0002_add_content_hash_to_documentchunk` (adds `content_hash` and backfills SHA-256 hashes for existing rows), `0003_chatmessage_mode` (adds `ChatMessage.mode`, `"text"` or `"voice"`, default `"text"`; existing rows become `"text"`).
 
 ### URL structure
 
@@ -115,7 +115,7 @@ There is **no route at `/`** — it returns 404. The entry point is `/chats/`. `
 - **All three GET list endpoints are paginated**, not just chunks. `DEFAULT_PAGINATION_CLASS = LimitOffsetPagination` with `PAGE_SIZE = 20` is global, so `/chats/api/`, `/chats/api/<pk>/messages/` and `/chats/api/<pk>/chunks/` all return `{"count", "next", "previous", "results"}` and all accept `limit`/`offset`. No client in the repo calls these GETs — the sidebar and chat history are server-rendered by the template views — but they are kept as the JSON read API.
 - **The API is unauthenticated and effectively CSRF-exempt.** `DEFAULT_AUTHENTICATION_CLASSES` and `DEFAULT_PERMISSION_CLASSES` are both `[]`, so DRF never runs `SessionAuthentication.enforce_csrf`. POSTs without a CSRF token reach the view and are processed. This is why the templates' `fetch()` calls send no token. Anyone who can reach the server can read every chat and spend OpenAI credit; adding auth means adding CSRF handling to the templates' `fetch()` calls at the same time.
 - Chats have no owner field and no scoping — the sidebar lists every chat in the database for every visitor.
-- **Streaming protocol (`/messages/stream/`).** Body `{"question": "..."}`. Response is `text/event-stream` with `Cache-Control: no-cache` and `X-Accel-Buffering: no`; every frame is `event: <name>\ndata: <single-line JSON>\n\n`:
+- **Streaming protocol (`/messages/stream/`).** Body `{"question": "...", "mode": "text" | "voice"}`. `mode` is optional (default `"text"`); any other value is a 400 (`{"mode": ["\"loud\" is not a valid choice."]}`) before the stream starts. `mode` means voice mode was on for the turn, not how the question was entered; `"voice"` selects the voice answer prompt and is saved on both rows. `mode` is not yet returned in `ChatMessageSerializer` output (voice-mode plan step B8). Response is `text/event-stream` with `Cache-Control: no-cache` and `X-Accel-Buffering: no`; every frame is `event: <name>\ndata: <single-line JSON>\n\n`:
   - `token` → `{"delta": "<text fragment>"}`, zero or more.
   - `done` → `[user_msg, assistant_msg]`, serialized with `ChatMessageSerializer` (assistant `content_html` rendered server-side).
   - `error` → `{"detail": "The answer could not be generated. Please try again."}` — generic on purpose; the traceback goes to the server log only. Nothing is saved.
@@ -138,3 +138,5 @@ Optional: `DEBUG` (default `False`), `ALLOWED_HOSTS` (default `127.0.0.1`), `CSR
 ---
 
 *Verified 2026-11-02 against `main` @ `af78051` plus the streaming-only change in the working tree. Routes, pagination shape, CSRF behavior, the `runserver` default port, the 405 on `POST /messages/`, and the SSE protocol (events, headers, 400/404 before the stream, no save on disconnect, header timing) were checked by executing them, not read from prior docs. Not exercised: the ASGI buffering claim (read from `django/http/response.py`, `sync_to_async(list)`) and the `chat.html` consumer in a real browser.*
+
+*Voice-mode Stage 1 (`ChatMessage.mode`, `mode` in the ask body, the voice answer prompt) verified 2026-11-04 against `main` @ `aeb0e86` plus the B3 working-tree change, by real requests to `/messages/stream/`: no `mode` / `"voice"` / `"loud"` (400), and text vs voice answers on the same questions.*
